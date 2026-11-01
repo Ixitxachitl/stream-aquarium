@@ -380,18 +380,6 @@ scene.add(camera);
 const TH = Math.PI / 6, COS = Math.cos(TH), SIN = Math.sin(TH);   // the camera looks down 30°
 const MAT = new THREE.MeshBasicMaterial({ vertexColors: true });
 const SHADOW_MAT = new THREE.MeshBasicMaterial({ color: 0x0a1a3a, transparent: true, opacity: .14, depthWrite: false });
-// A dark outline round a fish, so it stands out: a copy a pixel bigger all round, drawn inside out (only its far
-// side shows, peeking out round the edges).
-const OUTLINE_MAT = new THREE.MeshBasicMaterial({ color: 0x121026, side: THREE.BackSide });
-const _bb = new THREE.Box3(), _sz = new THREE.Vector3(), _ct = new THREE.Vector3();
-function outlined(mesh, pad = 1) {
-  mesh.geometry.computeBoundingBox();
-  _bb.copy(mesh.geometry.boundingBox); _bb.getSize(_sz); _bb.getCenter(_ct);
-  const hull = new THREE.Mesh(mesh.geometry, OUTLINE_MAT);
-  for (const a of ['x', 'y', 'z']) { const k = (_sz[a] + pad * 2) / Math.max(_sz[a], 1e-3); hull.scale[a] = k; hull.position[a] = mesh.position[a] + _ct[a] * (1 - k); }
-  mesh.parent.add(hull);
-  return mesh;
-}
 
 // The tank: sand along the bottom whose front edge sits 3 pixels off the bottom of the canvas, water up to the
 // surface, and some air above that for splashes and leaps.
@@ -751,9 +739,9 @@ function addFish(info) {
   f.root = new THREE.Group(); f.root.rotation.x = -TH; school.add(f.root);
   f.pivot = new THREE.Group(); f.root.add(f.pivot);
   f.inner = new THREE.Group(); f.pivot.add(f.inner);
-  outlined(addTo(f.inner, new THREE.Mesh(voxGeo(artVox(body, L.pal, ox, oy)), MAT)));
+  addTo(f.inner, new THREE.Mesh(voxGeo(artVox(body, L.pal, ox, oy)), MAT));
   f.tailG = new THREE.Group(); f.tailG.position.set(ox + body[join].search(/[^.]/), f.my, 0); f.inner.add(f.tailG);
-  outlined(addTo(f.tailG, new THREE.Mesh(voxGeo(artVox(tail, L.pal, -tw, -Math.floor(tail.length / 2))), MAT)));
+  addTo(f.tailG, new THREE.Mesh(voxGeo(artVox(tail, L.pal, -tw, -Math.floor(tail.length / 2))), MAT));
   f.shadow = new THREE.Mesh(ovalGeo(Math.ceil((w + tw) / 2), 3), SHADOW_MAT); f.shadow.renderOrder = 2; school.add(f.shadow);
   geoSink = null;
   prop(f.pivot, { dur: .4 });
