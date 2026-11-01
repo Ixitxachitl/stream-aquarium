@@ -49,7 +49,9 @@ Every setting can also be a URL parameter, which overrides it. The full list is 
 
 - **Most fish at once** is 40 by default. When the tank's full, the fish whose chatter has been quiet longest
   swims off to make room.
-- **No fish for** leaves out the usual chat bots (Nightbot, StreamElements and friends); add anyone else there.
+- **Filtering**, the same as in the other chat overlays: first-time chatters on Twitch (often spam bots) are left out
+  unless you switch them on, ~1k known bots from the public TwitchInsights list are hidden, and **Always hide these
+  users** starts with the usual chat bots (Nightbot, StreamElements and friends); add anyone else there.
 
 Chat is read anonymously: Twitch and Kick directly, YouTube with a Data API key (or a WebSocket bridge), TikTok
 through a bridge such as TikFinity.

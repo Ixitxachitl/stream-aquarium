@@ -32,7 +32,9 @@
     max       the most fish at once (default 40); when it's full, the quietest one leaves to make room
     names     always (default) = a name over every fish; chat = only for a moment when they chat; never
     say       1 = what they say pops up in a speech bubble over their fish (default 1; commands don't)
-    skip      names that never get a fish, comma separated (default: the usual chat bots)
+    firsttime 1 = show first-time chatters too (default 0: Twitch flags them, and spam bots usually show up that way)
+    botlist   1 = leave out the ~1k known bots on the public TwitchInsights list (default 1)
+    ignore    names to always leave out, comma separated (default: the usual chat bots)
 
   Feeding:
     feed      the command (default !feed; empty = off)
@@ -114,10 +116,11 @@
   .sp-f{margin:0 0 12px}
   .sp-f:last-child{margin-bottom:0}
   .sp-f label{display:block;margin-bottom:4px}
-  .sp-f input[type=text],.sp-f input[type=password],.sp-f input[type=number],.sp-f select{width:100%;box-sizing:border-box;
+  .sp-f input[type=text],.sp-f input[type=password],.sp-f input[type=number],.sp-f textarea,.sp-f select{width:100%;box-sizing:border-box;
     font:700 15px var(--txt);padding:7px 9px;border:2px solid var(--ink);border-radius:8px;background:#fff;color:var(--ink)}
-  .sp-f input:focus,.sp-f select:focus{outline:3px solid var(--cyan);outline-offset:1px}
-  .sp-f input:disabled,.sp-f select:disabled{background:#e8e6ef;color:#6a6278}
+  .sp-f input:focus,.sp-f textarea:focus,.sp-f select:focus{outline:3px solid var(--cyan);outline-offset:1px}
+  .sp-f input:disabled,.sp-f textarea:disabled,.sp-f select:disabled{background:#e8e6ef;color:#6a6278}
+  .sp-f textarea{min-height:58px;resize:vertical}
   .sp-f small{display:block;margin-top:5px;font-size:13px;color:#4a4560}
   .sp-f small.url{color:#c2185b}
   .sp-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
@@ -154,7 +157,6 @@ const Q = new URLSearchParams(location.search);
 const STORE_KEY = 'aquarium.settings.v1';
 let saved = {}, storageOK = true;
 try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || '{}') || {}; } catch (e) { storageOK = false; }
-const BOTS = 'nightbot, streamelements, streamlabs, moobot, fossabot, wizebot, sery_bot, botrix, kofistreambot, soundalerts';
 const FIELDS = [
   { sec: 'Chat' },
   { k: 'channel', label: 'Twitch channel', type: 'text', def: '', ph: 'yourchannel', help: 'Read anonymously, no login needed.' },
@@ -164,13 +166,16 @@ const FIELDS = [
   { k: 'ytkey', label: 'YouTube API key', type: 'password', def: '', help: 'YouTube Data API v3 key from Google Cloud Console.' },
   { k: 'ytpoll', label: 'YouTube check every (s)', type: 'num', def: 6, min: 2, max: 60, step: 1, help: 'Lower = snappier, but uses the daily API quota faster.' },
   { k: 'demo', label: 'Demo chat', type: 'bool', def: false, help: 'Fake chatters swim in and chat, for trying it out.' },
+  { sec: 'Filtering' },
+  { k: 'firsttime', label: 'Show first-time chatters', type: 'bool', def: false, help: 'Twitch flags these; spam bots usually show up this way.' },
+  { k: 'botlist', label: 'Hide known bots', type: 'bool', def: true, help: 'Public TwitchInsights list (needs the overlay hosted, not a local file).' },
+  { k: 'ignore', label: 'Always hide these users', type: 'area', def: 'nightbot, streamelements, streamlabs, moobot, fossabot, wizebot, soundalerts, sery_bot, kofistreambot, botrixoficial, commanderroot', help: 'Comma or line separated.' },
   { sec: 'Fish' },
   { k: 'stay', label: 'Swims off after (minutes quiet)', type: 'num', def: 20, min: 0, max: 600, step: 1,
     help: "A chatter's fish swims off once they've been quiet this long. 0 = it stays until the source reloads." },
   { k: 'max', label: 'Most fish at once', type: 'num', def: 40, min: 1, max: 150, step: 1, help: "When the tank's full, the fish whose chatter has been quiet longest swims off to make room." },
   { k: 'names', label: 'Names', type: 'select', def: 'always', opts: [['always', 'Always, over every fish'], ['chat', 'For a moment when they chat'], ['never', 'Never']] },
   { k: 'say', label: 'Chat in speech bubbles', type: 'bool', def: true, help: 'What they say pops up over their fish for a few seconds. Commands (!…) don\'t.' },
-  { k: 'skip', label: 'No fish for', type: 'text', def: BOTS, help: 'Bots and anyone else who shouldn\'t get a fish. Comma separated.' },
   { sec: 'Feeding' },
   { k: 'feed', label: 'Feed command', type: 'text', def: '!feed', help: 'Sprinkles fish food in, and every fish nearby races for it. Leave it empty to turn it off.' },
   { k: 'feedcd', label: 'Feeding cooldown (s)', type: 'num', def: 30, min: 0, max: 3600, step: 5, help: 'The broadcaster and mods skip it.' },
@@ -190,6 +195,9 @@ function coerce(f, v) {
   if (f.type === 'select') return f.opts.some(o => o[0] === v) ? v : f.def;
   return String(v ?? '').trim();
 }
+// the bot filter used to be called "skip"
+if (Q.has('skip') && !Q.has('ignore')) Q.set('ignore', Q.get('skip'));
+if (typeof saved.skip === 'string' && !('ignore' in saved)) saved.ignore = saved.skip;
 const fromURL = {};
 for (const f of Object.values(FIELD)) if (Q.has(f.k)) fromURL[f.k] = coerce(f, Q.get(f.k));
 const SET = {};
@@ -202,7 +210,6 @@ const CFG = {
   feed: SET.feed.toLowerCase().split(/\s+/)[0],
 };
 const DET = +CFG.detail;   // canvas pixels per art pixel, each way
-const SKIP = new Set(CFG.skip.toLowerCase().split(/[\s,]+/).map(s => s.replace(/^@/, '')).filter(Boolean));
 
 // Preview background outside OBS so you can actually see it in a browser
 const bgq = Q.get('bg');
@@ -956,8 +963,24 @@ window.aquarium = {
 };
 
 // ---------------- chat ----------------
+// ---------------- who's left out ----------------
+// The "ignore" names, plus (with "Hide known bots") the ~1k known bot accounts on the public TwitchInsights
+// list. If that can't be reached (offline, blocked, or the overlay opened as a local file), it's just the names.
+const IGNORE = new Set(CFG.ignore.toLowerCase().split(/[\s,]+/).map(s => s.replace(/^@/, '')).filter(Boolean));
+async function loadBotList() {
+  try {
+    const r = await fetch('https://api.twitchinsights.net/v1/bots/all', { cache: 'no-store' });
+    const j = await r.json();
+    (j.bots || []).forEach(b => { const name = Array.isArray(b) ? b[0] : b; if (name) IGNORE.add(String(name).toLowerCase()); });
+  } catch (e) {
+    console.warn('known-bot list unavailable, using ignore= only', e);
+  }
+  setTimeout(loadBotList, 6 * 3600 * 1000); // refresh every 6 hours
+}
+if (CFG.botlist) loadBotList();
+
 function handleChat({ name, text, platform = 'custom', owner = false, mod = false, color }) {
-  if (!name || SKIP.has(String(name).toLowerCase())) return;
+  if (!name || IGNORE.has(String(name).toLowerCase())) return;
   const plain = (text || '').replace(/^\x01ACTION |\x01$/g, '').trim(), cmd = plain.split(/\s+/)[0].toLowerCase();
   chatted(name, color, plain);
   if (CFG.feed && cmd === CFG.feed) feed(name, owner || mod);
@@ -985,6 +1008,7 @@ function connectTwitch(channel) {
       const m = /^(?:@(\S+) )?:([^!\s]+)![^ ]+ PRIVMSG #\S+ :(.*)$/.exec(line);
       if (!m) continue;
       const tags = m[1] ? parseTags(m[1]) : {}, badges = tags.badges || '';
+      if (tags['first-msg'] === '1' && !CFG.firsttime) continue;
       handleChat({ name: tags['display-name'] || m[2], text: m[3], platform: 'twitch', color: tags.color,
         owner: /(^|,)broadcaster\//.test(badges) || m[2] === channel,
         mod: tags.mod === '1' || /(^|,)moderator\//.test(badges) });
@@ -1151,8 +1175,8 @@ hostEl.addEventListener('click', e => {
       for (const [v, t] of f.opts) { const o = document.createElement('option'); o.value = v; o.textContent = t; inp.appendChild(o); }
       wrapF.append(lab, inp);
     } else {
-      inp = document.createElement('input');
-      inp.type = f.type === 'num' ? 'number' : f.type;
+      inp = document.createElement(f.type === 'area' ? 'textarea' : 'input');
+      if (f.type !== 'area') inp.type = f.type === 'num' ? 'number' : f.type;
       if (f.type === 'num') { inp.min = f.min; inp.max = f.max; inp.step = f.step; }
       if (f.ph) inp.placeholder = f.ph;
       inp.spellcheck = false; inp.autocomplete = 'off';
