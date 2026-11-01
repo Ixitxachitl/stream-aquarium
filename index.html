@@ -1,0 +1,1232 @@
+<!doctype html>
+<!--
+  Chat Aquarium — OBS browser source
+  ----------------------------------
+  A little pixel-art fish tank along the bottom of the screen, and everyone who chats gets a fish. A new
+  chatter's fish drops in from above with a splash; after that it swims about the tank on its own, wandering
+  between the seaweed, the rocks and the coral, now and then leaping out of the water. When they chat again
+  their fish darts about and blows bubbles, and what they said pops up in a speech bubble over it. A chatter who
+  has gone quiet for a while swims off the side of the tank. "!feed" sprinkles fish food in and every fish
+  nearby races for it.
+
+  Everything is a full 3D voxel model, seen flat on with no perspective, so it looks like 2D pixel art; only the
+  sand shows a little depth (the 2.5D look). Fish turn round in 3D. The same chatter always gets the same fish
+  (its shape, fins and pattern), in their chat color.
+
+  OBS: Add > Browser, URL https://aquarium.ixitxachitl.com/?channel=yourchannel, at your canvas size (e.g.
+       1920x1080). The background is transparent inside OBS.
+
+  CONTROLS: in OBS, right-click this source → Interact and move the mouse over the overlay. The bar in the
+  bottom-right corner adds a fish, feeds them or empties the tank; the gear opens the settings. Every setting
+  can also be a URL parameter, which overrides it.
+
+  Chat (all read anonymously, no login needed):
+    channel   Twitch channel          kick      Kick channel
+    tiktok    TikTok bridge: 1 = TikFinity on this PC, or a ws:// address
+    youtube   a live video ID or link (needs ytkey), or a ws:// bridge
+    ytkey     YouTube Data API v3 key ytpoll    seconds between YouTube checks (default 6)
+    demo      1 = fake chatters swim in and chat, for trying it out
+
+  Fish:
+    stay      minutes a chatter can be quiet before their fish swims off (default 20; 0 = it stays)
+    max       the most fish at once (default 40); when it's full, the quietest one leaves to make room
+    names     always (default) = a name over every fish; chat = only for a moment when they chat; never
+    say       1 = what they say pops up in a speech bubble over their fish (default 1; commands don't)
+    skip      names that never get a fish, comma separated (default: the usual chat bots)
+
+  Feeding:
+    feed      the command (default !feed; empty = off)
+    feedcd    seconds before the next feeding (default 30). The broadcaster and mods skip it.
+
+  Look:
+    height    how much of the screen the tank takes, % from the bottom (default 10)
+    width     how wide the tank is, % of the screen, in the middle (default 100)
+    pixel     screen pixels per art pixel (default 0 = about 1/216 of the source's height: 5 at 1080p)
+    water     0-90 how blue the water is (default 35; 0 = clear)
+    volume    0-100 sound effects (default 30; 0 = silent)
+    bg        testing: none = transparent in a normal browser too, or a color (default: dark outside OBS)
+
+  Custom integrations (Streamer.bot, etc.) can call window.aquarium.add(name, { color, text }),
+  window.aquarium.feed(), window.aquarium.remove(name) and window.aquarium.clear().
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Chat Aquarium</title>
+<link href="https://fonts.googleapis.com/css2?family=Bangers&family=Comic+Neue:wght@700&family=Pixelify+Sans:wght@600&display=swap" rel="stylesheet">
+<script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }</script>
+<style>
+  html,body{margin:0;padding:0;background:transparent;overflow:hidden;width:100%;height:100%}
+  :root{--ink:#111;--paper:#fff;--yellow:#fff27a;--pink:#ff2bd6;--violet:#7a5cff;--cyan:#00e5ff;--green:#39ff88;--sun:#ffe600;
+    --dots:radial-gradient(circle,rgba(0,0,0,.13) 1.2px,transparent 1.7px) 0 0/8px 8px;
+    --head:'Bangers',Impact,sans-serif;--txt:'Comic Neue',system-ui,sans-serif;--p:5px}
+  #c{position:fixed;image-rendering:pixelated;image-rendering:crisp-edges}
+
+  /* ---------- names and speech bubbles, over the fish ---------- */
+  #ui{position:fixed;inset:0;pointer-events:none;z-index:2;overflow:hidden}
+  .tag{position:absolute;left:0;top:0;display:flex;flex-direction:column;align-items:center;gap:calc(var(--p) * 1.2);will-change:transform}
+  .tag b{white-space:nowrap;font:600 calc(var(--p) * 2.6)/1 'Pixelify Sans',monospace;color:var(--c,#fff);text-shadow:var(--ol);transition:opacity .4s}
+  .tag b.off{opacity:0}
+  .say{position:relative;display:block;width:max-content;max-width:calc(var(--p) * 46);text-align:center;text-wrap:balance;overflow-wrap:anywhere;
+    font:600 calc(var(--p) * 2.4)/1.15 'Pixelify Sans',monospace;color:#121026;background:#fff;padding:calc(var(--p) * .7) calc(var(--p) * 1.4);
+    border:calc(var(--p) * .5) solid #121026;border-radius:calc(var(--p) * 1.4);scale:0;transform-origin:50% 100%;
+    transition:scale .18s ease-in}
+  .say.on{scale:1;transition:scale .3s cubic-bezier(.3,1.7,.5,1)}
+  .say:empty{display:none}
+  .say::after{content:'';position:absolute;left:50%;top:100%;translate:-50% 0;border:calc(var(--p) * .9) solid transparent;border-top-color:#121026}
+
+  #toast{position:fixed;left:50%;bottom:24px;translate:-50% 0;z-index:30;padding:9px 14px 7px;font:700 16px/1.3 var(--txt);
+    background:var(--paper);color:var(--ink);border:3px solid var(--ink);border-radius:10px;box-shadow:4px 4px 0 var(--ink);
+    opacity:0;transition:opacity .3s;pointer-events:none;max-width:80vw;text-align:center}
+  #toast.show{opacity:1}
+
+  /* ---------- host bar and the settings window (only visible while you interact with the source) ---------- */
+  .btn{font:18px/1 var(--head);letter-spacing:.05em;padding:9px 14px 7px;border:3px solid var(--ink);border-radius:10px;background:var(--paper);
+    color:var(--ink);box-shadow:3px 3px 0 var(--ink);cursor:pointer;transition:transform .06s}
+  .btn:hover{transform:translate(-1px,-2px)}
+  .btn:active{transform:translate(2px,2px);box-shadow:1px 1px 0 var(--ink)}
+  .btn.go{background:var(--pink);color:#fff;-webkit-text-stroke:1px var(--ink);paint-order:stroke fill}
+  .btn.warn{background:var(--yellow)}
+  #host{position:fixed;right:84px;bottom:22px;z-index:1000;display:flex;gap:10px;align-items:center;opacity:0;pointer-events:none;transition:opacity .25s}
+  body.mouse #host,#host:focus-within{opacity:1;pointer-events:auto}
+  #host input{width:150px;font:700 16px var(--txt);padding:8px 10px;border:3px solid var(--ink);border-radius:10px;box-shadow:3px 3px 0 var(--ink);outline:0}
+  #host input:focus{border-color:var(--violet)}
+  #gear{position:fixed;right:20px;bottom:20px;width:50px;height:50px;z-index:1000;border:3px solid var(--ink);border-radius:50%;
+    background:var(--sun);box-shadow:3px 3px 0 var(--ink);cursor:pointer;display:grid;place-items:center;opacity:0;pointer-events:none;
+    transition:opacity .25s,transform .2s}
+  body.mouse #gear{opacity:1;pointer-events:auto}
+  #gear:hover{transform:rotate(30deg)}
+  #gear svg{width:28px;height:28px}
+  #settings{position:fixed;inset:0;z-index:1001;display:none;align-items:center;justify-content:center;
+    background:rgba(18,10,38,.7);pointer-events:auto;font:700 15px/1.35 var(--txt);color:var(--ink)}
+  #settings.open{display:flex}
+  .sp{width:min(900px,92vw);max-height:90vh;display:flex;flex-direction:column;background:var(--paper);border:4px solid var(--ink);
+    border-radius:16px;box-shadow:8px 8px 0 var(--ink);overflow:hidden}
+  .sp-head{padding:16px 22px 12px;background:var(--dots),var(--cyan);border-bottom:4px solid var(--ink)}
+  .sp-head h2{margin:0;font:32px/1 var(--head);letter-spacing:.04em;color:var(--sun);-webkit-text-stroke:1.5px var(--ink);paint-order:stroke fill;
+    text-shadow:3px 3px 0 var(--ink)}
+  .sp-head p{margin:8px 0 0;font-size:14px;color:var(--ink)}
+  .sp-body{overflow:auto;padding:20px 24px;display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:20px;background:var(--dots),#eef8ff}
+  .sp-sec{padding:12px 14px 14px;background:var(--paper);border:3px solid var(--ink);border-radius:12px;box-shadow:4px 4px 0 var(--ink)}
+  .sp-sec h3{margin:0 0 10px;font:22px/1 var(--head);letter-spacing:.04em;color:var(--violet)}
+  .sp-f{margin:0 0 12px}
+  .sp-f:last-child{margin-bottom:0}
+  .sp-f label{display:block;margin-bottom:4px}
+  .sp-f input[type=text],.sp-f input[type=password],.sp-f input[type=number],.sp-f select{width:100%;box-sizing:border-box;
+    font:700 15px var(--txt);padding:7px 9px;border:2px solid var(--ink);border-radius:8px;background:#fff;color:var(--ink)}
+  .sp-f input:focus,.sp-f select:focus{outline:3px solid var(--cyan);outline-offset:1px}
+  .sp-f input:disabled,.sp-f select:disabled{background:#e8e6ef;color:#6a6278}
+  .sp-f small{display:block;margin-top:5px;font-size:13px;color:#4a4560}
+  .sp-f small.url{color:#c2185b}
+  .sp-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .sp-row label{margin:0}
+  .sw{position:relative;width:46px;height:24px;flex:none}
+  .sw input{opacity:0;width:100%;height:100%;margin:0;position:absolute;cursor:pointer;z-index:1}
+  .sw i{position:absolute;inset:0;background:#d6d2e2;border:2px solid var(--ink);border-radius:20px}
+  .sw i::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;background:#fff;border:2px solid var(--ink);border-radius:50%;
+    box-sizing:border-box;transition:transform .12s ease-out}
+  .sw input:checked + i{background:var(--green)}
+  .sw input:checked + i::after{transform:translateX(22px)}
+  .sw input:disabled + i{opacity:.5}
+  .sp-foot{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:14px 22px;background:var(--yellow);border-top:4px solid var(--ink)}
+  .sp-foot .grow{flex:1}
+  .sp-msg{font-size:14px;color:#c2185b;min-height:1em}
+  .sp-link{width:100%;font:12px monospace;padding:6px;border:2px solid var(--ink);border-radius:6px;display:none;margin-top:4px}
+  @media (max-height:560px){
+    #settings{align-items:flex-start}
+    .sp{max-height:none;height:100vh;overflow:auto;display:block;border-radius:0}
+    .sp-head p{display:none}
+    .sp-body{overflow:visible}
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui"></div>
+<div id="toast"></div>
+<script type="module">
+import * as THREE from 'three';
+
+// ---------------- settings (saved locally; URL parameters override) ----------------
+const Q = new URLSearchParams(location.search);
+const STORE_KEY = 'aquarium.settings.v1';
+let saved = {}, storageOK = true;
+try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || '{}') || {}; } catch (e) { storageOK = false; }
+const BOTS = 'nightbot, streamelements, streamlabs, moobot, fossabot, wizebot, sery_bot, botrix, kofistreambot, soundalerts';
+const FIELDS = [
+  { sec: 'Chat' },
+  { k: 'channel', label: 'Twitch channel', type: 'text', def: '', ph: 'yourchannel', help: 'Read anonymously, no login needed.' },
+  { k: 'kick', label: 'Kick channel', type: 'text', def: '', ph: 'yourchannel', help: 'Read anonymously, no login needed.' },
+  { k: 'tiktok', label: 'TikTok bridge', type: 'text', def: '', ph: '1 = TikFinity, or ws://…', help: 'TikTok needs a local bridge app. "1" uses TikFinity on this PC.' },
+  { k: 'youtube', label: 'YouTube live', type: 'text', def: '', ph: 'video ID / link, or ws://…', help: 'A live video ID or link (needs the API key below), or a bridge address.' },
+  { k: 'ytkey', label: 'YouTube API key', type: 'password', def: '', help: 'YouTube Data API v3 key from Google Cloud Console.' },
+  { k: 'ytpoll', label: 'YouTube check every (s)', type: 'num', def: 6, min: 2, max: 60, step: 1, help: 'Lower = snappier, but uses the daily API quota faster.' },
+  { k: 'demo', label: 'Demo chat', type: 'bool', def: false, help: 'Fake chatters swim in and chat, for trying it out.' },
+  { sec: 'Fish' },
+  { k: 'stay', label: 'Swims off after (minutes quiet)', type: 'num', def: 20, min: 0, max: 600, step: 1,
+    help: "A chatter's fish swims off once they've been quiet this long. 0 = it stays until the source reloads." },
+  { k: 'max', label: 'Most fish at once', type: 'num', def: 40, min: 1, max: 150, step: 1, help: "When the tank's full, the fish whose chatter has been quiet longest swims off to make room." },
+  { k: 'names', label: 'Names', type: 'select', def: 'always', opts: [['always', 'Always, over every fish'], ['chat', 'For a moment when they chat'], ['never', 'Never']] },
+  { k: 'say', label: 'Chat in speech bubbles', type: 'bool', def: true, help: 'What they say pops up over their fish for a few seconds. Commands (!…) don\'t.' },
+  { k: 'skip', label: 'No fish for', type: 'text', def: BOTS, help: 'Bots and anyone else who shouldn\'t get a fish. Comma separated.' },
+  { sec: 'Feeding' },
+  { k: 'feed', label: 'Feed command', type: 'text', def: '!feed', help: 'Sprinkles fish food in, and every fish nearby races for it. Leave it empty to turn it off.' },
+  { k: 'feedcd', label: 'Feeding cooldown (s)', type: 'num', def: 30, min: 0, max: 3600, step: 5, help: 'The broadcaster and mods skip it.' },
+  { sec: 'Look' },
+  { k: 'height', label: 'Tank height (% of the screen)', type: 'num', def: 10, min: 5, max: 60, step: 1, help: 'How much of the bottom of the screen is water.' },
+  { k: 'width', label: 'Tank width (% of the screen)', type: 'num', def: 100, min: 20, max: 100, step: 1, help: 'A narrower tank sits in the middle.' },
+  { k: 'pixel', label: 'Pixel size', type: 'num', def: 0, min: 0, max: 16, step: 1, help: 'Screen pixels per art pixel: bigger is chunkier. 0 = automatic (5 at 1080p).' },
+  { k: 'water', label: 'Water tint', type: 'num', def: 35, min: 0, max: 90, step: 5, help: '0 = clear water, higher = bluer.' },
+  { k: 'volume', label: 'Sound effects volume', type: 'num', def: 30, min: 0, max: 100, step: 5, help: '0 = silent.' },
+];
+const FIELD = Object.fromEntries(FIELDS.filter(f => f.k).map(f => [f.k, f]));
+function coerce(f, v) {
+  if (f.type === 'bool') return v === true || v === 1 || /^(1|true|yes|on)$/i.test(String(v));
+  if (f.type === 'num') { const n = parseFloat(v); return isNaN(n) ? f.def : Math.min(f.max, Math.max(f.min, n)); }
+  if (f.type === 'select') return f.opts.some(o => o[0] === v) ? v : f.def;
+  return String(v ?? '').trim();
+}
+const fromURL = {};
+for (const f of Object.values(FIELD)) if (Q.has(f.k)) fromURL[f.k] = coerce(f, Q.get(f.k));
+const SET = {};
+for (const f of Object.values(FIELD)) SET[f.k] = f.k in fromURL ? fromURL[f.k] : f.k in saved ? coerce(f, saved[f.k]) : f.def;
+const CFG = {
+  ...SET,
+  channel: SET.channel.replace(/^.*twitch\.tv\//i, '').replace(/^#/, '').replace(/[/?#].*$/, '').toLowerCase(),
+  kick: SET.kick.replace(/^.*kick\.com\//i, '').replace(/[/?#].*$/, '').toLowerCase(),
+  tiktok: SET.tiktok === '1' ? 'ws://localhost:21213/' : SET.tiktok,
+  feed: SET.feed.toLowerCase().split(/\s+/)[0],
+};
+const SKIP = new Set(CFG.skip.toLowerCase().split(/[\s,]+/).map(s => s.replace(/^@/, '')).filter(Boolean));
+
+// Preview background outside OBS so you can actually see it in a browser
+const bgq = Q.get('bg');
+if (bgq && bgq !== 'none') document.body.style.background = bgq;
+else if (!bgq && !window.obsstudio) document.body.style.background = '#1a0f33';
+
+const $ = id => document.getElementById(id);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const lerp = (a, b, k) => a + (b - a) * k;
+let toastT;
+function toast(text) {
+  const t = $('toast'); t.textContent = text; t.classList.add('show');
+  clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 3500);
+}
+
+// ---------------- random numbers ----------------
+function hash(s) { let h = 2166136261; for (const ch of String(s)) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619); } return h >>> 0; }
+const hash3 = (a, b, c) => ((Math.imul(a | 0, 73856093) ^ Math.imul(b | 0, 19349663) ^ Math.imul(c | 0, 83492791)) >>> 0) % 1000003;
+function rngOf(seed) {
+  let a = seed >>> 0;
+  return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+const rnd = Math.random;
+const pick = (a, r = rnd) => a[Math.floor(r() * a.length)];
+const range = (a, b, r = rnd) => a + (b - a) * r();
+function noise2(x, y, seed) {
+  const h = (i, j) => (Math.imul(Math.imul(i, 374761393) ^ Math.imul(j, 668265263) ^ seed, 1274126177) >>> 16) / 65535;
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi, u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  return lerp(lerp(h(xi, yi), h(xi + 1, yi), u), lerp(h(xi, yi + 1), h(xi + 1, yi + 1), u), v);
+}
+
+// ---------------- colors ----------------
+const _hsl = {}, adjCache = new Map();
+// lighten / saturate / turn a CSS color, in sRGB
+function adj(css, dl = 0, ds = 0, dh = 0) {
+  dl = Math.round(dl * 100) / 100;
+  const k = css + '|' + dl + '|' + ds + '|' + dh;
+  let v = adjCache.get(k);
+  if (v) return v;
+  const c = new THREE.Color(css); c.getHSL(_hsl, THREE.SRGBColorSpace);
+  c.setHSL((_hsl.h + dh + 1) % 1, clamp(_hsl.s + ds, 0, 1), clamp(_hsl.l + dl, 0, 1), THREE.SRGBColorSpace);
+  adjCache.set(k, v = '#' + c.getHexString(THREE.SRGBColorSpace));
+  return v;
+}
+// A chatter's color, kept bright enough to show up; chatters without one get a color of their own from their name.
+function fishColor(name, color) {
+  const c = /^#?[0-9a-f]{6}$/i.test(color || '') ? new THREE.Color(color[0] === '#' ? color : '#' + color) : null;
+  if (c) {
+    c.getHSL(_hsl, THREE.SRGBColorSpace);
+    c.setHSL(_hsl.h, clamp(_hsl.s, .45, .9), clamp(_hsl.l, .42, .64), THREE.SRGBColorSpace);
+    return '#' + c.getHexString(THREE.SRGBColorSpace);
+  }
+  const h = hash(name.toLowerCase());
+  return '#' + new THREE.Color(`hsl(${h % 360},${65 + (h >>> 9) % 25}%,${50 + (h >>> 14) % 10}%)`).getHexString(THREE.SRGBColorSpace);
+}
+
+// ---------------- voxels ----------------
+// Each face: its normal, its corners (counter-clockwise from outside) and its light. The light comes down
+// through the water, so the tops are bright and the sides and undersides sink into a cool blue.
+const FACES = [
+  [[1, 0, 0], [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]], [.88, .92, 1]],
+  [[-1, 0, 0], [[0, 0, 1], [0, 1, 1], [0, 1, 0], [0, 0, 0]], [.68, .76, .9]],
+  [[0, 1, 0], [[0, 1, 1], [1, 1, 1], [1, 1, 0], [0, 1, 0]], [1.12, 1.12, 1.06]],
+  [[0, -1, 0], [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]], [.48, .56, .7]],
+  [[0, 0, 1], [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]], [1, 1, 1]],
+  [[0, 0, -1], [[1, 0, 0], [0, 0, 0], [0, 1, 0], [1, 1, 0]], [.6, .66, .8]],
+];
+// Ambient occlusion: each corner of a face gets darker the more cubes crowd round it (the usual voxel trick),
+// so the nooks of the rocks and the inside of the chest shade themselves.
+const AO = [1, .85, .74, .64];
+for (const f of FACES) {
+  const n = f[0], [i, j] = n[0] ? [1, 2] : n[1] ? [0, 2] : [0, 1];
+  f[3] = f[1].map(k => {
+    const a = [0, 0, 0], b = [0, 0, 0];
+    a[i] = k[i] * 2 - 1; b[j] = k[j] * 2 - 1;
+    return [a, b, [a[0] + b[0], a[1] + b[1], a[2] + b[2]]];
+  });
+}
+const vkey = (x, y, z) => ((x + 512) * 1024 + (y + 512)) * 1024 + (z + 512);
+const colCache = new Map();
+const linear = css => { let c = colCache.get(css); if (!c) colCache.set(css, c = new THREE.Color(css)); return c; };
+// geometries made while this is set get put on it, so they can be thrown away together
+let geoSink = null;
+// vox: [x, y, z, color] unit cubes; only the faces that aren't against another cube are kept
+function voxGeo(vox) {
+  const occ = new Set();
+  for (const v of vox) occ.add(vkey(v[0], v[1], v[2]));
+  const pos = [], col = [];
+  for (const [x, y, z, css] of vox) {
+    const c = linear(css);
+    for (const [n, q, t, off] of FACES) {
+      const nx = x + n[0], ny = y + n[1], nz = z + n[2];
+      if (occ.has(vkey(nx, ny, nz))) continue;
+      const ao = off.map(([a, b, d]) => {
+        const s1 = occ.has(vkey(nx + a[0], ny + a[1], nz + a[2])), s2 = occ.has(vkey(nx + b[0], ny + b[1], nz + b[2]));
+        return AO[s1 && s2 ? 3 : s1 + s2 + occ.has(vkey(nx + d[0], ny + d[1], nz + d[2]))];
+      });
+      for (const i of [0, 1, 2, 0, 2, 3]) {
+        pos.push(x + q[i][0], y + q[i][1], z + q[i][2]);
+        col.push(Math.min(1, c.r * t[0] * ao[i]), Math.min(1, c.g * t[1] * ao[i]), Math.min(1, c.b * t[2] * ao[i]));
+      }
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  if (geoSink) geoSink.push(geo);
+  return geo;
+}
+// a little voxel model being put together
+class VB {
+  constructor() { this.m = new Map(); }
+  set(x, y, z, c) { if (c) this.m.set(vkey(x, y, z), [x, y, z, c]); else this.m.delete(vkey(x, y, z)); }
+  box(x0, y0, z0, x1, y1, z1, c) {
+    for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) this.set(x, y, z, typeof c === 'function' ? c(x, y, z) : c);
+  }
+  geo() { return voxGeo([...this.m.values()]); }
+}
+// a flat oval lying on the sand (the fish's shadows)
+function ovalGeo(rx, rz, css = '#000') {
+  const vox = [];
+  for (let x = -rx; x < rx; x++) for (let z = -rz; z < rz; z += 2) {
+    if (((x + .5) / rx) ** 2 + ((z + 1) / rz) ** 2 <= 1) vox.push([x, 0, z, css], [x, 0, z + 1, css]);
+  }
+  return voxGeo(vox);
+}
+
+// ---------------- the scene ----------------
+const canvas = $('c');
+const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: false });
+renderer.setPixelRatio(1);
+renderer.setClearColor(0x000000, 0);
+const scene = new THREE.Scene();
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 4000);
+scene.add(camera);
+const TH = Math.PI / 6, COS = Math.cos(TH), SIN = Math.sin(TH);   // the camera looks down 30°
+const MAT = new THREE.MeshBasicMaterial({ vertexColors: true });
+const SHADOW_MAT = new THREE.MeshBasicMaterial({ color: 0x0a1a3a, transparent: true, opacity: .14, depthWrite: false });
+// A dark outline round a fish, so it stands out: a copy a pixel bigger all round, drawn inside out (only its far
+// side shows, peeking out round the edges).
+const OUTLINE_MAT = new THREE.MeshBasicMaterial({ color: 0x121026, side: THREE.BackSide });
+const _bb = new THREE.Box3(), _sz = new THREE.Vector3(), _ct = new THREE.Vector3();
+function outlined(mesh, pad = 1) {
+  mesh.geometry.computeBoundingBox();
+  _bb.copy(mesh.geometry.boundingBox); _bb.getSize(_sz); _bb.getCenter(_ct);
+  const hull = new THREE.Mesh(mesh.geometry, OUTLINE_MAT);
+  for (const a of ['x', 'y', 'z']) { const k = (_sz[a] + pad * 2) / Math.max(_sz[a], 1e-3); hull.scale[a] = k; hull.position[a] = mesh.position[a] + _ct[a] * (1 - k); }
+  mesh.parent.add(hull);
+  return mesh;
+}
+
+// The tank: sand along the bottom whose front edge sits 3 pixels off the bottom of the canvas, water up to the
+// surface, and some air above that for splashes and leaps.
+// "Screen y" (sy) is how many pixels something is above the sand's front edge; models are placed so they land
+// on exactly that row whatever their depth, so they never smear.
+const DEPTH = 8;         // how far back the sand goes
+const AIR = 12;          // rows of air over the water
+let PX = 5, W = 2, H = 2, HW = 2, SURF = 2, cssLeft = 0, cssTop = 0;
+const BASE = 3;          // the sand's front edge, in rows up from the bottom of the canvas
+// The canvas is drawn at one pixel per art pixel and blown up, so it stays crisp. One world unit = one pixel across.
+function layout() {
+  PX = CFG.pixel || Math.max(2, Math.round(innerHeight / 216));
+  W = Math.max(60, Math.ceil(innerWidth * CFG.width / 100 / PX / 2) * 2);
+  HW = Math.max(16, Math.round(innerHeight * CFG.height / 100 / PX));
+  H = Math.ceil((HW + AIR) / 2) * 2;
+  SURF = HW - BASE;      // the first row above the water
+  renderer.setSize(W, H, false);
+  cssLeft = Math.floor((innerWidth - W * PX) / 2); cssTop = innerHeight - H * PX;
+  Object.assign(canvas.style, { width: W * PX + 'px', height: H * PX + 'px', left: cssLeft + 'px', top: cssTop + 'px' });
+  camera.left = -W / 2; camera.right = W / 2; camera.top = H / 2; camera.bottom = -H / 2;
+  camera.updateProjectionMatrix();
+  const ty = (H / 2 - BASE) / COS;
+  camera.position.set(0, ty + SIN * 1000, COS * 1000);
+  camera.lookAt(0, ty, 0);
+  const r = document.documentElement.style, o = Math.max(1, Math.round(PX * .4));
+  r.setProperty('--p', PX + 'px');
+  r.setProperty('--ol', [[o, 0], [-o, 0], [0, o], [0, -o], [o, o], [-o, o], [o, -o], [-o, -o]].map(([x, y]) => `${x}px ${y}px 0 #121026`).join(','));
+}
+const worldY = (sy, z) => (sy + z * SIN) / COS;   // the height that puts something at depth z on screen row sy
+const sandAt = z => Math.ceil(-z * SIN);           // the screen row the sand comes up to, at depth z
+const cssX = x => cssLeft + (W / 2 + x) * PX;
+const cssY = sy => cssTop + (H - BASE - sy) * PX;
+// Models are full 3D, but each one is tipped back to face the camera straight on, so they look flat (no looking
+// down on them) and every cube comes out exactly one pixel on screen. Only the sand shows depth.
+function model(x, z, y = 0, parent) {
+  const root = new THREE.Group(); root.position.set(x, y, z); root.rotation.x = -TH;
+  const pivot = new THREE.Group(), inner = new THREE.Group();
+  root.add(pivot); pivot.add(inner); parent.add(root);
+  return { root, pivot, inner };
+}
+
+// ---------------- things growing in ----------------
+const easeOutBack = k => 1 + 2.4 * Math.pow(k - 1, 3) + 1.4 * Math.pow(k - 1, 2);
+let props = [];
+function prop(obj, { delay = 0, dur = .5, ground = false } = {}) {
+  props.push({ obj, at: clock + delay, dur, ground });
+  obj.scale.setScalar(1e-4);
+}
+function updateProps() {
+  props = props.filter(p => {
+    const k = (clock - p.at) / p.dur, e = k <= 0 ? 1e-4 : k >= 1 ? 1 : Math.max(1e-4, easeOutBack(k));
+    if (p.ground) p.obj.scale.set(1, e, e); else p.obj.scale.setScalar(e);
+    return k < 1;
+  });
+}
+
+// ---------------- the water ----------------
+// A dithered see-through blue behind everything, lighter near the top, with slow shafts of light slanting down
+// through it and a rippling line of light along the surface. Redrawn a dozen times a second.
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+let water = null;
+function buildWater() {
+  if (water) { camera.remove(water.mesh); water.tex.dispose(); water.mesh.geometry.dispose(); water.mesh.material.dispose(); }
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = HW;
+  const ctx = cv.getContext('2d'), img = ctx.createImageData(W, HW);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.magFilter = tex.minFilter = THREE.NearestFilter; tex.generateMipmaps = false; tex.colorSpace = THREE.SRGBColorSpace;
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(W, HW), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false }));
+  mesh.position.set(0, -H / 2 + HW / 2, -3000); mesh.renderOrder = -1; camera.add(mesh);
+  const rays = [];
+  for (let i = 0, n = Math.max(2, Math.round(W / 70)); i < n; i++) rays.push({ x: range(-.1, 1.1) * W, w: range(4, 11), k: range(.5, 1), sp: range(.1, .25), ph: range(0, 6.3) });
+  water = { cv, ctx, img, tex, mesh, rays, next: 0 };
+}
+function drawWater() {
+  const { img, ctx, tex, rays } = water, d = img.data, A = CFG.water / 100;
+  const top = [90, 200, 235], bot = [26, 82, 160], ray = [215, 248, 255];
+  const rx = rays.map(r => r.x + Math.sin(clock * r.sp + r.ph) * 16);
+  for (let y = 0; y < HW; y++) {
+    const t = y / (HW - 1);
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4, th = (BAYER[(y & 3) * 4 + (x & 3)] + .5) / 16;
+      let c, a;
+      if (y < 2) {
+        // the surface: a bright line that ripples, with darker gaps sliding along it
+        const wv = Math.sin(x * .29 + clock * 2.2) + Math.sin(x * .11 - clock * 1.5) * .8 + (y ? -.8 : 0);
+        c = wv > -.2 ? [230, 252, 255] : [130, 215, 242];
+        a = wv > -.2 ? .85 : .5 + A * .4;
+      } else {
+        let l = 0;
+        for (let j = 0; j < rays.length; j++) { const dx = Math.abs(x - rx[j] + y * .55); if (dx < rays[j].w) l += (1 - dx / rays[j].w) * rays[j].k; }
+        const lq = Math.floor(Math.min(1, l * (1 - t * .75)) * 3 + th) / 3, tq = Math.floor(t * 4 + th) / 4;
+        c = [0, 1, 2].map(k => lerp(lerp(top[k], bot[k], tq), ray[k], lq * .5));
+        a = Math.floor((A * (.75 + .25 * tq) + lq * .1) * 20 + th) / 20;
+      }
+      d[i] = c[0]; d[i + 1] = c[1]; d[i + 2] = c[2]; d[i + 3] = Math.round(clamp(a, 0, 1) * 255);
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  tex.needsUpdate = true;
+}
+
+// ---------------- the sand and the things on it ----------------
+let decor = null, decorGeos = [], sways = [], chest = null, bubblers = [];
+function sandCol(x, z) {
+  const band = Math.floor(z / 2), n = hash3(x, band, 7) % 100, base = adj('#ead49c', band / (DEPTH / 2) * .1);
+  if (n < 3) return pick(['#b8a080', '#a89cb8', '#c88a6a', '#8a9aa8'], () => n / 3);
+  if ((x + band * 3) % 11 === 0) return adj(base, -.06);   // little ripples in the sand
+  return n < 30 ? adj(base, -.04) : n < 42 ? adj(base, .04) : base;
+}
+function buildSand() {
+  const x0 = -W / 2 - 2, x1 = W / 2 + 2;
+  for (let cx = x0; cx < x1; cx += 32) {
+    const cw = Math.min(32, x1 - cx), mid = cx + cw / 2, b = new VB();
+    for (let x = cx; x < cx + cw; x++) {
+      for (let z = -DEPTH; z < 0; z++) b.set(x - mid, -1, z + DEPTH / 2, sandCol(x, z));
+      // the front edge, so the sand looks like a layer
+      for (let y = -4; y <= -2; y++) b.set(x - mid, y, DEPTH / 2 - 1, hash3(x, y, 3) % 9 ? (y === -2 ? '#d4b478' : '#bc9a62') : '#a8885a');
+    }
+    const g = new THREE.Group(); g.position.set(mid, 0, -DEPTH / 2); decor.add(g);
+    g.add(new THREE.Mesh(b.geo(), MAT));
+    prop(g, { delay: Math.abs(mid) / (W / 2) * .4, dur: .45, ground: true });
+  }
+}
+// Seaweed sways: each one has a few frames, swapped in turn (like a sprite), so it never smears.
+function seaweed(x, z, r) {
+  const h = Math.round(range(6, Math.max(7, Math.min(22, HW - 6)), r)), amp = range(1, 2.4, r);
+  const base = pick(['#2e9b56', '#3aa860', '#2a8a6a', '#5a9a3a', '#3a8a8a'], r), frames = [];
+  for (let f = 0; f < 8; f++) {
+    const b = new VB(), a = f / 8 * Math.PI * 2;
+    for (let y = 0; y < h; y++) {
+      const off = Math.round(Math.sin(a + y * .45) * amp * (y / h));
+      b.set(off, y, 0, y >= h - 2 ? adj(base, .12) : y % 3 === 1 ? adj(base, -.05) : base);
+      if (y < h * .45) b.set(off + 1, y, 0, adj(base, -.09));
+      if (y % 4 === 2 && y < h - 2) b.set(y % 8 === 2 ? off - 1 : off + 2, y + 1, 0, adj(base, .06));
+    }
+    frames.push(b.geo());
+  }
+  const m = model(x, z, 0, decor), mesh = new THREE.Mesh(frames[0], MAT);
+  m.inner.add(mesh);
+  sways.push({ mesh, frames, ph: r(), sp: range(.25, .45, r) });
+  prop(m.pivot, { delay: .4 + r() * .5, dur: .5 });
+}
+function rock(x, z, r) {
+  const rw = Math.round(range(3, 6, r)), rh = Math.round(range(2, Math.min(5, HW / 4), r)), seed = (r() * 1e6) | 0;
+  const base = pick(['#8a8ea8', '#7a7088', '#9a8a7a', '#6a7a8a'], r), moss = r() < .4, b = new VB();
+  for (let xx = -rw; xx <= rw; xx++) for (let y = 0; y <= rh; y++) for (let zz = -2; zz <= 2; zz++) {
+    if ((xx / (rw + .5)) ** 2 + (y / (rh + .5)) ** 2 + (zz / 2.5) ** 2 + (noise2(xx * .6 + 9, y * .6 + zz, seed) - .5) * .5 > 1) continue;
+    b.set(xx, y, zz, moss && y >= rh - 1 && noise2(xx * .8, zz + 5, seed + 1) > .45 ? '#4a9a5a' : adj(base, y / rh * .08 + (noise2(xx * .9, y * .9, seed + 2) - .5) * .1));
+  }
+  const m = model(x, z, 0, decor); m.inner.add(new THREE.Mesh(b.geo(), MAT));
+  prop(m.pivot, { delay: .3 + r() * .4, dur: .45 });
+}
+function coral(x, z, r) {
+  const c = pick(['#ff6a8a', '#ff8a4a', '#c86aff', '#ffb84a', '#ff5a6a'], r), b = new VB();
+  b.box(-1, 0, 0, 1, 0, 0, adj(c, -.12));
+  for (let i = 0, n = 2 + Math.floor(r() * 3); i < n; i++) {
+    // a branch from the base, leaning out sideways as it grows
+    const lean = Math.round(range(-4, 4, r)), top = Math.round(range(3, Math.max(4, Math.min(9, HW - 9)), r));
+    let cx = Math.round(range(-1, 1, r));
+    for (let y = 1; y <= top; y++) {
+      if (r() < .45 && cx !== lean) cx += Math.sign(lean - cx);
+      b.set(cx, y, 0, y >= top ? adj(c, .16) : y < 2 ? adj(c, -.08) : c);
+    }
+  }
+  const m = model(x, z, 0, decor); m.inner.add(new THREE.Mesh(b.geo(), MAT));
+  prop(m.pivot, { delay: .4 + r() * .4, dur: .45 });
+}
+// a little treasure chest whose lid pops open now and then, letting out a burst of bubbles
+function chestGeo(open) {
+  const b = new VB(), gold = '#f0c840';
+  b.box(-4, 0, -2, 3, 3, 1, (x, y) => x === -4 || x === 3 ? gold : y === 1 ? '#6a4220' : '#8a5a2a');
+  if (!open) {
+    b.box(-4, 4, -2, 3, 5, 1, (x, y) => x === -4 || x === 3 ? gold : y === 5 ? '#9a6a34' : '#8a5a2a');
+    b.set(-1, 4, 2, '#ffe066'); b.set(0, 4, 2, '#ffe066');
+  } else {
+    b.box(-3, 4, -1, 2, 4, 0, (x, y, z) => (x + z) & 1 ? '#ffe066' : '#f0b030');   // the gold inside
+    b.box(-4, 4, -3, 3, 9, -3, (x, y) => x === -4 || x === 3 || y === 9 ? gold : '#7a4a22');   // the lid, flipped up
+  }
+  return b.geo();
+}
+function buildChest(x, z) {
+  const m = model(x, z, 0, decor), geoC = chestGeo(false), geoO = chestGeo(true), mesh = new THREE.Mesh(geoC, MAT);
+  m.inner.add(mesh);
+  prop(m.pivot, { delay: .6, dur: .5 });
+  chest = { mesh, geoC, geoO, x, z, next: clock + range(8, 20), shut: 0 };
+}
+// an air stone, with a steady stream of bubbles
+function bubbler(x, z) {
+  const b = new VB();
+  b.box(-1, 0, -1, 1, 1, 1, (xx, y) => y ? '#7a8aa0' : '#5a6a80');
+  const m = model(x, z, 0, decor); m.inner.add(new THREE.Mesh(b.geo(), MAT));
+  prop(m.pivot, { delay: .5, dur: .4 });
+  bubblers.push({ x, z, next: 0 });
+}
+// The layout of the tank is the same every time for the same channel (and size).
+function buildDecor() {
+  if (decor) { scene.remove(decor); for (const g of decorGeos) g.dispose(); }
+  decor = new THREE.Group(); scene.add(decor);
+  decorGeos = []; sways = []; bubblers = []; chest = null;
+  geoSink = decorGeos;
+  const r = rngOf(hash('aquarium:' + (CFG.channel || CFG.kick || 'tank') + ':' + W + 'x' + HW));
+  buildSand();
+  const zOf = () => -Math.round(range(2, DEPTH - 1, r));
+  const spots = [];
+  for (let x = -W / 2 + range(4, 14, r); x < W / 2 - 4; x += range(12, 28, r)) spots.push(Math.round(x));
+  const chestAt = W >= 100 ? Math.floor(r() * spots.length) : -1;
+  const bubAt = W >= 140 ? (chestAt + 2 + Math.floor(r() * (spots.length - 3))) % spots.length : -1;
+  spots.forEach((x, i) => {
+    if (i === chestAt) return buildChest(x, -Math.round(range(4, DEPTH - 3, r)));
+    if (i === bubAt) return bubbler(x, zOf());
+    const k = r();
+    if (k < .3) rock(x, zOf(), r);
+    else if (k < .7) for (let j = 0, n = 1 + Math.floor(r() * 3); j < n; j++) seaweed(x + j * Math.round(range(2, 4, r)), zOf(), r);
+    else if (k < .9) coral(x, zOf(), r);
+  });
+  geoSink = null;
+}
+
+// ---------------- bubbles, splashes and fish food ----------------
+const MAXP = 600, FOOD = ['#e8a040', '#c86a2a', '#f0d060', '#7ac84a', '#e8604a'];
+let parts = [], partMesh = null, foods = [];
+const _m = new THREE.Object3D(), _c = new THREE.Color();
+// x and sy as on screen; wz is how far back it is, so the fish in front of it hide it
+function spawn(o) {
+  if (parts.length >= MAXP) return;
+  parts.push({ vx: 0, vy: 0, g: 0, life: 2, col: '#ffffff', s: 1, wz: 0, ph: Math.random() * 6.3, ...o });
+}
+function bubbles(x, sy, wz, n, spread = 1) {
+  for (let i = 0; i < n; i++) spawn({ kind: 'bubble', x: x + range(-spread, spread), y: sy + i * .7, vy: range(9, 16), life: 12, wz,
+    col: pick(['#e8faff', '#b8ecff', '#ffffff']), s: Math.random() < .15 ? 2 : 1 });
+}
+function splash(x, n = 10) {
+  for (let i = 0; i < n; i++) spawn({ kind: 'drop', x: x + range(-3, 3), y: SURF, vx: range(-26, 26), vy: range(14, 40), g: 150, life: 1.5, col: pick(['#e8faff', '#9adcff', '#ffffff']) });
+  bubbles(x, SURF - 3, 0, 3, 3);
+  sfx('splash');
+}
+function updateParts(dt) {
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    p.life -= dt;
+    if (p.kind === 'bubble') {
+      p.y += p.vy * dt; p.x += Math.sin(clock * 6 + p.ph) * 5 * dt;
+      if (p.y >= SURF - 1) p.life = 0;
+    } else if (p.kind === 'food') {
+      // drifts down, then lies on the sand for a while
+      if (p.y > p.floor) { p.y = Math.max(p.floor, p.y - p.vy * dt); p.x += Math.sin(clock * 2 + p.ph) * 4 * dt; }
+    } else {
+      p.vy -= p.g * dt; p.x += p.vx * dt; p.y += p.vy * dt;
+      if (p.kind === 'drop' && p.vy < 0 && p.y < SURF) p.life = 0;
+    }
+    if (p.life <= 0) parts.splice(i, 1);
+  }
+  partMesh.count = parts.length;
+  parts.forEach((p, i) => {
+    _m.position.set(Math.round(p.x) + .5, Math.round(p.y) + .5, (p.y * SIN + p.wz) / COS + 1.5);
+    _m.scale.setScalar(p.s); _m.updateMatrix();
+    partMesh.setMatrixAt(i, _m.matrix); partMesh.setColorAt(i, _c.set(p.col));
+  });
+  partMesh.instanceMatrix.needsUpdate = true;
+  if (partMesh.instanceColor) partMesh.instanceColor.needsUpdate = true;
+}
+
+// ---------------- sound effects (made on the fly, no files) ----------------
+let ac = null, master = null, noiseBuf = null;
+function audio() {
+  if (!CFG.volume) return null;
+  if (!ac) {
+    try {
+      ac = new (window.AudioContext || window.webkitAudioContext)();
+      master = ac.createGain(); master.gain.value = CFG.volume / 100 * .5; master.connect(ac.destination);
+      noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+      const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    } catch (e) { return null; }
+  }
+  if (ac.state === 'suspended') ac.resume().catch(() => {});
+  return ac;
+}
+function env(g, t, a, peak, rel) { g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(peak, t + a); g.gain.exponentialRampToValueAtTime(.0001, t + a + rel); }
+function noise(t, dur, type, freq, q, peak, a = .005) {
+  const s = ac.createBufferSource(); s.buffer = noiseBuf;
+  const f = ac.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q;
+  const g = ac.createGain(); env(g, t, a, peak, dur);
+  s.connect(f).connect(g).connect(master); s.start(t, Math.random()); s.stop(t + a + dur + .05);
+}
+function tone(t, type, f0, f1, dur, peak, a = .005) {
+  const o = ac.createOscillator(); o.type = type; o.frequency.setValueAtTime(f0, t);
+  if (f1 !== f0) o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  const g = ac.createGain(); env(g, t, a, peak, dur);
+  o.connect(g).connect(master); o.start(t); o.stop(t + a + dur + .05);
+}
+let lastSfx = {};
+function sfx(kind) {
+  const a = audio(); if (!a) return;
+  const t = a.currentTime;
+  if (t - (lastSfx[kind] || -1) < .08) return;   // a crowd of them at once sounds like one
+  lastSfx[kind] = t;
+  if (kind === 'plop') { tone(t, 'sine', 900, 160, .16, .3); noise(t, .12, 'lowpass', 1200, 1, .15); }
+  else if (kind === 'splash') { noise(t, .25, 'highpass', 1500, .7, .14); noise(t, .2, 'bandpass', 600, 1, .12); }
+  else if (kind === 'blub') for (let i = 0; i < 3; i++) tone(t + i * .07, 'sine', 300 + i * 60, 820 + i * 120, .06, .14);
+  else if (kind === 'nom') tone(t, 'square', 520, 900, .05, .04);
+  else if (kind === 'sprinkle') for (let i = 0; i < 7; i++) noise(t + i * .05 + Math.random() * .03, .03, 'highpass', 4500, 1, .12);
+  else if (kind === 'creak') { tone(t, 'sawtooth', 110, 150, .25, .05, .05); }
+}
+
+// ---------------- the fish ----------------
+// Side views, facing right: D back, B body, b belly, F fins, W/E eye, M mouth. Body cells are three cubes thick,
+// fins one, so they turn round in 3D. The tail is separate, so it can wag; it joins on at the mouth's row.
+const SPECIES = {
+  classic: { body: ['....FFF....', '...DDDDDD..', '..DDDDDDWE.', '.BBBBBBBBBM', '..bbbbbbbb.', '...bbbbbb..', '.....FF....'], tail: ['FF..', '.FF.', '..FF', '.FF.', 'FF..'] },
+  round: { body: ['...FF....', '..DDDDD..', '.DDDDDWE.', 'BBBBBBBBM', '.bbbbbbb.', '..bbbbb..', '...F.F...'], tail: ['FF.', 'FFF', '.FF', 'FFF', 'FF.'] },
+  angel: { body: ['...F....', '...FF...', '..DDDD..', '.DDDDWE.', 'BBBBBBBM', '.bbbbbb.', '..bbbb..', '...FF...', '...F....'], tail: ['F.', 'FF', 'F.'] },
+  long: { body: ['...FFFFFF.....', '.DDDDDDDDDDWE.', 'BBBBBBBBBBBBBM', '.bbbbbbbbbbbb.'], tail: ['FF.', '.FF', 'FF.'], fast: 1.3 },
+  puffer: { body: ['..F..F..', '.DDDDDD.', 'FDDDDWEF', '.BBBBBBM', 'FbbbbbbF', '.bbbbbb.', '..F..F..'], tail: ['F.', 'FF', 'F.'], fast: .8 },
+};
+const KINDS = ['classic', 'classic', 'classic', 'round', 'round', 'angel', 'long', 'puffer'];
+const ACCENT = ['#ffd21a', '#f4f4f8', '#ff4fb0', '#2fb8ff', '#3ad16a', '#ff7a1a', '#b07aff'];
+function artVox(rows, pal, ox, oy) {
+  const vox = [];
+  rows.forEach((row, r) => [...row].forEach((ch, i) => {
+    if (ch === '.') return;
+    const x = i + ox, y = rows.length - 1 - r + oy;
+    if (ch === 'F') vox.push([x, y, 0, pal.F]);
+    else for (let z = -1; z <= 1; z++) vox.push([x, y, z, pal[ch]]);
+  }));
+  return vox;
+}
+// The same chatter always gets the same fish: its shape, fins and markings; the body is their chat color.
+function fishLook(name, color) {
+  const r = rngOf(hash('fish:' + name.toLowerCase())), kind = pick(KINDS, r), sp = SPECIES[kind], C = fishColor(name, color);
+  const pal = { D: adj(C, -.1), B: C, b: adj(C, .14, -.12), F: r() < .5 ? adj(C, -.16, 0, .03) : pick(ACCENT, r),
+    W: '#ffffff', E: '#1a1020', M: adj(C, -.3), S: '#f4f4f8', P: adj(C, .2, -.1) };
+  let body = sp.body;
+  const mark = r(), w = body[0].length;
+  if (mark < .22 && kind !== 'long') {
+    // clownfish stripes
+    const cols = [Math.round(w * .3), Math.round(w * .62)];
+    body = body.map(row => [...row].map((ch, i) => cols.includes(i) && 'DBb'.includes(ch) ? 'S' : ch).join(''));
+  } else if (mark < .45) body = body.map(row => [...row].map(ch => 'DB'.includes(ch) && r() < .2 ? 'P' : ch).join(''));
+  return { kind, sp, pal, body, C, speed: range(8, 15, r) * (sp.fast || 1) };
+}
+
+const fishes = new Map();   // lower-case name → fish
+let school = null;
+function addFish(info) {
+  const L = fishLook(info.name, info.color), body = L.body, rows = body.length, w = body[0].length;
+  const ox = -Math.floor(w / 2), oy = -Math.floor(rows / 2), join = body.findIndex(r => r.includes('M'));
+  const tail = L.sp.tail, tw = tail[0].length;
+  const f = { name: info.name, look: L, geos: [], top: rows - 1 + oy, bot: oy, front: ox + w, my: rows - 1 - join + oy, cx: -tw / 2,
+    x: range(-W / 2 + 20, W / 2 - 20), y: SURF + 6, z: -Math.round(range(1, DEPTH - 1)), vx: range(-8, 8), vy: 0, tz: 0, facing: 1, yaw: 0, pitch: 0,
+    mode: 'air', above: true, target: false, idleUntil: 0, dartUntil: 0, wag: 0, ph: range(0, 6.3), food: null, leaving: false,
+    lastChat: performance.now(), sayUntil: 0, nameUntil: clock + 8, nameOn: null, bubbleAt: clock + range(3, 9) };
+  f.tz = f.z; f.facing = f.vx < 0 ? -1 : 1; f.yaw = f.facing > 0 ? 0 : -Math.PI;
+  geoSink = f.geos;
+  f.root = new THREE.Group(); f.root.rotation.x = -TH; school.add(f.root);
+  f.pivot = new THREE.Group(); f.root.add(f.pivot);
+  f.inner = new THREE.Group(); f.pivot.add(f.inner);
+  outlined(addTo(f.inner, new THREE.Mesh(voxGeo(artVox(body, L.pal, ox, oy)), MAT)));
+  f.tailG = new THREE.Group(); f.tailG.position.set(ox + body[join].search(/[^.]/), f.my, 0); f.inner.add(f.tailG);
+  outlined(addTo(f.tailG, new THREE.Mesh(voxGeo(artVox(tail, L.pal, -tw, -Math.floor(tail.length / 2))), MAT)));
+  f.shadow = new THREE.Mesh(ovalGeo(Math.ceil((w + tw) / 2), 3), SHADOW_MAT); f.shadow.renderOrder = 2; school.add(f.shadow);
+  geoSink = null;
+  prop(f.pivot, { dur: .4 });
+  // the name and speech bubble, over it
+  f.tag = document.createElement('div'); f.tag.className = 'tag';
+  f.sayEl = document.createElement('span'); f.sayEl.className = 'say';
+  f.nameEl = document.createElement('b'); f.nameEl.textContent = info.name; f.nameEl.style.setProperty('--c', L.C);
+  f.tag.append(f.sayEl, f.nameEl); $('ui').appendChild(f.tag);
+  f.tagW = f.tag.offsetWidth;
+  fishes.set(info.name.toLowerCase(), f);
+  sfx('plop');
+  return f;
+}
+const addTo = (parent, mesh) => { parent.add(mesh); return mesh; };
+function removeFish(f) {
+  school.remove(f.root); school.remove(f.shadow);
+  for (const g of f.geos) g.dispose();
+  f.tag.remove();
+  if (fishes.get(f.name.toLowerCase()) === f) fishes.delete(f.name.toLowerCase());
+}
+// off the nearest side of the tank
+function leave(f) {
+  if (f.leaving) return;
+  f.leaving = true; f.leaveX = (f.x < 0 ? -1 : 1) * (W / 2 + 30); f.food = null;
+}
+// how high and low it can swim at depth z (between the sand and the surface)
+const lowest = (f, z) => sandAt(z) + 1 - f.bot, highest = f => SURF - 3 - f.top;
+function newTarget(f) {
+  f.tz = -Math.round(range(1, DEPTH - 1));
+  const xr = W / 2 - 4 - (f.front - f.cx), lo = lowest(f, f.tz);
+  f.tx = clamp(Math.random() < .6 ? f.x + range(-80, 80) : range(-xr, xr), -xr, xr);
+  f.ty = range(lo, Math.max(lo, highest(f)));
+  f.target = true;
+}
+function say(f, text) {
+  f.sayEl.textContent = text.length > 90 ? text.slice(0, 88) + '…' : text;
+  f.sayEl.classList.remove('on'); void f.sayEl.offsetWidth; f.sayEl.classList.add('on');
+  f.sayUntil = clock + 4 + Math.min(6, text.length / 15);
+  f.tagW = f.tag.offsetWidth;
+}
+function unsay(f) {
+  f.sayUntil = 0; f.sayEl.classList.remove('on');
+  setTimeout(() => { if (!f.sayUntil) { f.sayEl.textContent = ''; f.tagW = f.tag.offsetWidth; } }, 250);
+}
+function jump(f) {
+  f.mode = 'air'; f.above = false; f.target = false;
+  f.vy = range(42, 52); f.vx = f.facing * range(18, 30);
+}
+// they chatted: a dart about and some bubbles, or a leap if it's near the top
+function excite(f) {
+  if (f.mode !== 'swim' || f.leaving) return;
+  if (f.y >= highest(f) - 5 && Math.random() < .5) return jump(f);
+  newTarget(f); f.dartUntil = clock + .9;
+  bubbles(f.x + f.facing * f.front, f.y + f.my, f.z, 4);
+  sfx('blub');
+}
+
+function updateFish(f, dt) {
+  const lo = lowest(f, f.z), hi = highest(f);
+  if (f.mode === 'air') {
+    // dropping in, or leaping out: falls while it's out of the water, and splashes going in and out
+    const above = f.y > SURF - 2;
+    if (above !== f.above) { f.above = above; splash(f.x); }
+    if (above) f.vy -= 150 * dt;
+    f.x += f.vx * dt; f.y += f.vy * dt;
+    if (!above && f.vy < 0) { f.mode = 'swim'; f.vy *= .25; f.vx *= .6; f.dartUntil = 0; }
+    f.pitch = lerp(f.pitch, clamp(Math.atan2(f.vy, Math.abs(f.vx) + 4), -1.2, 1.2), Math.min(1, dt * 10));
+  } else {
+    let tx, ty, sp = f.look.speed;
+    if (f.leaving) { tx = f.leaveX; ty = f.y; sp *= 1.7; }
+    else if (foods.length && (f.food = hungry(f))) {
+      tx = f.food.x - f.facing * f.front; ty = f.food.y - f.my; sp = Math.max(sp * 2.2, 26); f.tz = -1;
+      if (Math.abs(f.x + f.facing * f.front - f.food.x) < 2.5 && Math.abs(f.y + f.my - f.food.y) < 2.5) eat(f);
+    } else {
+      if (!f.target && clock > f.idleUntil) newTarget(f);
+      if (f.target) { tx = f.tx; ty = f.ty; }
+      if (clock < f.dartUntil) sp *= 3;
+    }
+    let dvx = 0, dvy = 0;
+    if (tx !== undefined) {
+      const dx = tx - f.x, dy = ty - f.y, d = Math.hypot(dx, dy) || 1;
+      if (!f.leaving && !f.food && f.target && d < 2) { f.target = false; f.idleUntil = clock + range(.5, 4); }
+      const s = sp * Math.min(1, d / 14 + .2);
+      dvx = dx / d * s; dvy = dy / d * s * .7;
+    }
+    const k = Math.min(1, dt * (f.food ? 3 : 1.6));
+    f.vx += (dvx - f.vx) * k; f.vy += (dvy - f.vy) * k;
+    f.x += f.vx * dt; f.y += f.vy * dt;
+    f.z += (f.tz - f.z) * Math.min(1, dt * .6);
+    // the sand and the surface push back, gently
+    if (f.y < lo) f.y += (lo - f.y) * Math.min(1, dt * 6);
+    if (f.y > hi) f.y += (hi - f.y) * Math.min(1, dt * 4);
+    if (!f.leaving) { const xr = W / 2 - 2 - (f.front - f.cx); f.x = clamp(f.x, -xr, xr); }
+    else if (Math.abs(f.x) > W / 2 + 24) return false;
+    if (Math.abs(f.vx) > 2.5 && sgn(f.vx) !== f.facing) f.facing = sgn(f.vx);
+    f.pitch = lerp(f.pitch, clamp(f.vy / (Math.abs(f.vx) + 10), -.45, .45), Math.min(1, dt * 5));
+    // now and then a leap out of the water, or a few bubbles
+    if (!f.leaving && f.y >= hi - 2 && Math.abs(f.vx) > 6 && Math.random() < dt / 45) jump(f);
+    if (clock > f.bubbleAt) { f.bubbleAt = clock + range(4, 14); bubbles(f.x + f.facing * f.front, f.y + f.my, f.z, 1 + Math.floor(Math.random() * 2)); }
+  }
+  // turning round shows its face on the way (the turn goes through facing you)
+  f.yaw += ((f.facing > 0 ? 0 : -Math.PI) - f.yaw) * Math.min(1, dt * 7);
+  const v = Math.hypot(f.vx, f.vy);
+  f.wag += dt * (5 + v * .45);
+  f.tailG.rotation.y = Math.sin(f.wag) * (.3 + Math.min(.5, v / 40));
+  f.inner.rotation.z = f.pitch;
+  f.inner.position.y = f.mode === 'swim' && v < 4 ? Math.round(Math.sin(clock * 1.6 + f.ph) * .6) : 0;
+  f.pivot.rotation.y = f.yaw;
+  // whole pixels only, so the art never smears
+  const x = Math.round(f.x), y = Math.round(f.y), z = Math.round(f.z);
+  f.root.position.set(x, worldY(y, z), z);
+  f.shadow.visible = f.y < SURF;
+  f.shadow.position.set(Math.round(x + f.cx * f.facing), .06, z);
+  f.shadow.scale.x = f.shadow.scale.z = f.pivot.scale.x * clamp(1 - (y - lo) / 30, .45, 1);
+  return true;
+}
+const sgn = v => v < 0 ? -1 : 1;
+// the nearest bit of food it hasn't lost to anyone yet
+function hungry(f) {
+  if (f.food && f.food.life > 0) return f.food;
+  let best = null, bd = 140;
+  const mx = f.x + f.facing * f.front, my = f.y + f.my;
+  for (const p of foods) { const d = Math.hypot(p.x - mx, p.y - my); if (d < bd) { bd = d; best = p; } }
+  return best;
+}
+function eat(f) {
+  f.food.life = 0; f.food = null;
+  f.wag += 3; sfx('nom');
+  bubbles(f.x + f.facing * f.front, f.y + f.my, f.z, 1);
+}
+function placeTag(f) {
+  const show = CFG.names === 'always' || (CFG.names === 'chat' && clock < f.nameUntil);
+  if (show !== f.nameOn) { f.nameOn = show; f.nameEl.classList.toggle('off', !show); }
+  if (f.sayUntil && clock > f.sayUntil) unsay(f);
+  // kept inside the tank, so a fish by the edge doesn't push its speech bubble off the screen
+  const m = f.leaving ? -1e4 : f.tagW / 2 + 4, x = clamp(cssX(Math.round(f.x) + .5), Math.min(cssLeft + m, cssX(0)), Math.max(cssLeft + W * PX - m, cssX(0))), y = cssY(Math.round(f.y) + f.top + 2 + f.inner.position.y);
+  f.tag.style.transform = `translate(${x.toFixed(1)}px,${y.toFixed(1)}px) translate(-50%,-100%)`;
+}
+
+// ---------------- the clock ----------------
+let clock = 0, lastT = 0, raf = 0;
+// (testing: timer=1 steps on timers instead of animation frames, so headless screenshots move on)
+const nextFrame = Q.get('timer') === '1' ? f => setTimeout(() => f(performance.now()), 16) : requestAnimationFrame;
+function loop(t) {
+  raf = nextFrame(loop);
+  const now = t / 1000, dt = Math.min(.05, Math.max(0, now - lastT)); lastT = now; clock += dt;
+  updateProps();
+  foods = parts.filter(p => p.kind === 'food' && p.life > 0);
+  for (const f of [...fishes.values()]) if (!updateFish(f, dt)) removeFish(f);
+  for (const s of sways) s.mesh.geometry = s.frames[Math.floor(((clock * s.sp + s.ph) % 1) * s.frames.length)];
+  if (chest) {
+    if (clock > chest.next) {
+      chest.mesh.geometry = chest.geoO; chest.shut = clock + 2.5; chest.next = clock + range(25, 50);
+      bubbles(chest.x, sandAt(chest.z) + 6, chest.z, 9, 3);
+      for (let i = 0; i < 4; i++) spawn({ kind: 'glint', x: chest.x + range(-3, 3), y: sandAt(chest.z) + 5, vy: range(4, 10), life: .5, col: '#fff6a0', wz: chest.z });
+      sfx('creak'); sfx('blub');
+    }
+    if (chest.shut && clock > chest.shut) { chest.mesh.geometry = chest.geoC; chest.shut = 0; }
+  }
+  for (const b of bubblers) if (clock > b.next) { b.next = clock + range(.15, .5); bubbles(b.x, sandAt(b.z) + 2, b.z, 1, .5); }
+  if (clock > water.next) { water.next = clock + 1 / 12; drawWater(); }
+  updateParts(dt);
+  for (const f of fishes.values()) placeTag(f);
+  renderer.render(scene, camera);
+}
+
+// ---------------- chatters ----------------
+const cleanName = s => String(s || '').trim().split(/\s+/)[0].replace(/^@+/, '').replace(/[^\p{L}\p{N}_.-]/gu, '').slice(0, 25);
+function chatted(name, color, text) {
+  const k = name.toLowerCase();
+  let f = fishes.get(k);
+  if (!f) {
+    // a full tank: whoever's been quiet longest makes room
+    const here = [...fishes.values()].filter(o => !o.leaving);
+    if (here.length >= CFG.max) leave(here.reduce((a, b) => a.lastChat < b.lastChat ? a : b));
+    f = addFish({ name, color });
+  } else {
+    f.leaving = false;
+    excite(f);
+  }
+  f.lastChat = performance.now();
+  f.nameUntil = clock + 8;
+  if (CFG.say && text && !text.startsWith('!')) say(f, text);
+  return f;
+}
+// chatters who've gone quiet swim off
+setInterval(() => {
+  if (!CFG.stay) return;
+  const now = performance.now();
+  for (const f of fishes.values()) if (now - f.lastChat > CFG.stay * 60000) leave(f);
+}, 5000);
+let lastFeed = -Infinity;
+function feed(by, skipCooldown) {
+  if (!skipCooldown && performance.now() - lastFeed < CFG.feedcd * 1000) return false;
+  lastFeed = performance.now();
+  const f = by && fishes.get(by.toLowerCase()), cx = f && !f.leaving ? f.x : range(-W / 2 + 30, W / 2 - 30);
+  sfx('sprinkle');
+  for (let i = 0; i < 16; i++) setTimeout(() => spawn({ kind: 'food', x: clamp(cx + range(-28, 28), -W / 2 + 4, W / 2 - 4), y: SURF - 1, vy: range(3, 6),
+    floor: range(6, 9), life: 30, col: pick(FOOD), wz: 0 }), i * 50);
+  return true;
+}
+window.aquarium = {
+  add: (name, o = {}) => { const n = cleanName(name); if (n) chatted(n, o.color, o.text || ''); },
+  feed: () => feed(null, true),
+  remove: name => { const f = fishes.get(cleanName(name).toLowerCase()); if (f) leave(f); },
+  clear: () => { for (const f of fishes.values()) leave(f); },
+};
+
+// ---------------- chat ----------------
+function handleChat({ name, text, platform = 'custom', owner = false, mod = false, color }) {
+  if (!name || SKIP.has(String(name).toLowerCase())) return;
+  const plain = (text || '').replace(/^\x01ACTION |\x01$/g, '').trim(), cmd = plain.split(/\s+/)[0].toLowerCase();
+  chatted(name, color, plain);
+  if (CFG.feed && cmd === CFG.feed) feed(name, owner || mod);
+}
+
+// ---------------- Twitch (anonymous IRC over WebSocket) ----------------
+function parseTags(raw) {
+  const o = {};
+  const un = v => v.replace(/\\(.)/g, (_, c) => ({ s: ' ', ':': ';', '\\': '\\', r: '\r', n: '\n' }[c] ?? c));
+  raw.split(';').forEach(kv => { const i = kv.indexOf('='); o[kv.slice(0, i)] = un(kv.slice(i + 1)); });
+  return o;
+}
+function connectTwitch(channel) {
+  const ws = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
+  ws.onopen = () => {
+    ws.send('CAP REQ :twitch.tv/tags twitch.tv/commands');
+    ws.send('PASS SCHMOOPIIE');
+    ws.send('NICK justinfan' + Math.floor(10000 + Math.random() * 80000));
+    ws.send('JOIN #' + channel);
+  };
+  ws.onmessage = (ev) => {
+    for (const line of ev.data.split('\r\n')) {
+      if (!line) continue;
+      if (line.startsWith('PING')) { ws.send('PONG :tmi.twitch.tv'); continue; }
+      const m = /^(?:@(\S+) )?:([^!\s]+)![^ ]+ PRIVMSG #\S+ :(.*)$/.exec(line);
+      if (!m) continue;
+      const tags = m[1] ? parseTags(m[1]) : {}, badges = tags.badges || '';
+      handleChat({ name: tags['display-name'] || m[2], text: m[3], platform: 'twitch', color: tags.color,
+        owner: /(^|,)broadcaster\//.test(badges) || m[2] === channel,
+        mod: tags.mod === '1' || /(^|,)moderator\//.test(badges) });
+    }
+  };
+  ws.onclose = () => setTimeout(() => connectTwitch(channel), 3000);
+}
+
+// ---------------- Kick (anonymous, Kick's public Pusher chat socket) ----------------
+const KICK_PUSHER = 'wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=8.4.0&flash=false';
+async function connectKick(slug) {
+  let chatroom;
+  try {
+    const r = await fetch(`https://kick.com/api/v2/channels/${encodeURIComponent(slug)}`);
+    chatroom = (await r.json()).chatroom?.id;
+    if (!chatroom) throw new Error('no chatroom');
+  } catch (e) { console.warn('[aquarium] Kick channel lookup failed for', slug, e); return setTimeout(() => connectKick(slug), 30000); }
+  kickSocket(chatroom);
+}
+function kickSocket(chatroom) {
+  const ws = new WebSocket(KICK_PUSHER);
+  ws.onmessage = (ev) => {
+    let o; try { o = JSON.parse(ev.data); } catch { return; }
+    if (o.event === 'pusher:connection_established') {
+      ws.send(JSON.stringify({ event: 'pusher:subscribe', data: { auth: '', channel: `chatrooms.${chatroom}.v2` } }));
+      return;
+    }
+    if (o.event === 'pusher:ping') { ws.send(JSON.stringify({ event: 'pusher:pong', data: {} })); return; }
+    let d; try { d = typeof o.data === 'string' ? JSON.parse(o.data) : o.data; } catch { return; }
+    if (!d || String(o.event).split('\\').pop() !== 'ChatMessageEvent') return;
+    const s = d.sender || {}, badges = (s.identity?.badges || []).map(b => b.type);
+    handleChat({ name: s.username, text: (d.content || '').replace(/\[emote:\d+:([^\]]+)\]/g, '$1'), platform: 'kick', color: s.identity?.color,
+      owner: badges.includes('broadcaster') || String(s.slug || s.username || '').toLowerCase() === CFG.kick,
+      mod: badges.includes('moderator') });
+  };
+  ws.onclose = () => setTimeout(() => kickSocket(chatroom), 3000);
+  ws.onerror = () => {};
+}
+
+// ---------------- WebSocket bridges (TikFinity for TikTok, or any bridge for YouTube) ----------------
+function connectBridge(url, platform) {
+  let ws;
+  try { ws = new WebSocket(url); } catch (e) { return setTimeout(() => connectBridge(url, platform), 5000); }
+  ws.onmessage = (ev) => {
+    let o; try { o = JSON.parse(ev.data); } catch { return; }
+    const type = (o.event || o.type || '').toString().toLowerCase(), d = o.data || o;
+    if (type && !['chat', 'comment', 'message', 'chatmessage'].includes(type)) return;
+    const name = d.nickname || d.uniqueId || d.displayName || d.chatname || d.user?.nickname || d.user?.uniqueId || d.user?.name || d.username;
+    const text = d.comment || d.message || d.text || d.chatmessage;
+    if (name && typeof text === 'string')
+      handleChat({ name, text, platform, owner: !!(d.isOwner || d.isStreamer || d.isBroadcaster || d.isChatOwner),
+        mod: !!(d.isModerator || d.isMod || d.isChatModerator) });
+  };
+  ws.onclose = () => setTimeout(() => connectBridge(url, platform), 3000);
+  ws.onerror = () => {};
+}
+
+// ---------------- YouTube (Data API v3 polling) ----------------
+async function connectYouTube(videoId, key) {
+  const API = 'https://www.googleapis.com/youtube/v3/';
+  const retry = () => setTimeout(() => connectYouTube(videoId, key), 30000);
+  let chatId;
+  try {
+    const r = await fetch(`${API}videos?part=liveStreamingDetails&id=${encodeURIComponent(videoId)}&key=${encodeURIComponent(key)}`);
+    chatId = (await r.json()).items?.[0]?.liveStreamingDetails?.activeLiveChatId;
+    if (!chatId) { console.warn('[aquarium] YouTube: no active live chat for', videoId); return retry(); }
+  } catch (e) { return retry(); }
+  let pageToken = '', first = true;
+  const poll = async () => {
+    let wait = CFG.ytpoll * 1000;
+    try {
+      const r = await fetch(`${API}liveChat/messages?liveChatId=${encodeURIComponent(chatId)}&part=snippet,authorDetails&maxResults=200&key=${encodeURIComponent(key)}${pageToken ? '&pageToken=' + pageToken : ''}`);
+      const j = await r.json();
+      if (j.error) { if (r.status === 403 || r.status === 404) return retry(); wait = 15000; }
+      else {
+        pageToken = j.nextPageToken || pageToken;
+        wait = Math.max(wait, j.pollingIntervalMillis || 0);
+        // (the backlog from before connecting is skipped)
+        if (!first) for (const it of j.items || []) if (it.snippet?.displayMessage)
+          handleChat({ name: it.authorDetails?.displayName, text: it.snippet.displayMessage, platform: 'youtube',
+            owner: !!it.authorDetails?.isChatOwner, mod: !!it.authorDetails?.isChatModerator });
+        first = false;
+      }
+    } catch (e) { wait = 15000; }
+    setTimeout(poll, wait);
+  };
+  poll();
+}
+const ytId = (v) => (/(?:v=|youtu\.be\/|live\/)([\w-]{11})/.exec(v) || [])[1] || v;
+
+// ---------------- demo chat ----------------
+const DEMO = [['BubbleTrouble', '#1e90ff'], ['CaptainFin', '#ff7f50'], ['Glub_Glub', '#9acd32'], ['SirSwimsALot', '#8a2be2'],
+  ['KelpMeImSinking', '#2e8b57'], ['GillyBean', '#ff69b4'], ['ReefRaff', '#daa520'], ['TunaTurner', '#00ced1'], ['CodFather', '#b22222'],
+  ['Krillvin', '#ff1493'], ['SalmonChanted', '#fa8072'], ['Bloopy', ''], ['ClownAround', '#ff4500'], ['DeepEndDan', '#4169e1']];
+const DEMO_LINES = ['hi fish!', 'glub glub', 'lol', 'this tank is so cozy', 'who fed the fish?', 'GG', 'bloop', '><>', 'hello from the deep end',
+  'look at me go', 'brb getting snacks', 'I am a fish now', 'pog', 'nice stream!', 'blub blub blub', 'that chest has treasure in it'];
+function runDemo() {
+  const [name, color] = pick(DEMO);
+  handleChat({ name, color, text: Math.random() < .07 ? CFG.feed || pick(DEMO_LINES) : pick(DEMO_LINES), platform: 'demo', owner: true });
+  setTimeout(runDemo, range(1500, 4500));
+}
+
+// ---------------- host bar and settings window ----------------
+const hostEl = document.createElement('form');
+hostEl.id = 'host';
+hostEl.innerHTML = `<input name="a" placeholder="name" spellcheck="false" autocomplete="off"><button class="btn go">Add fish</button><button class="btn" type="button" data-h="feed">Feed</button><button class="btn" type="button" data-h="clear">Empty tank</button>`;
+document.body.appendChild(hostEl);
+hostEl.addEventListener('submit', e => {
+  e.preventDefault();
+  const n = cleanName(hostEl.a.value) || pick(DEMO)[0];
+  chatted(n, DEMO.find(d => d[0] === n)?.[1], '');
+  hostEl.a.value = '';
+});
+hostEl.addEventListener('click', e => {
+  if (e.target.dataset?.h === 'feed') feed(null, true);
+  if (e.target.dataset?.h === 'clear') window.aquarium.clear();
+});
+
+// Open it from OBS: right-click the source → Interact, move the mouse, click the gear.
+(function settingsUI() {
+  const gear = document.createElement('button');
+  gear.id = 'gear'; gear.title = 'Chat Aquarium settings';
+  gear.innerHTML = `<svg viewBox="0 0 24 24" fill="#fff" stroke="#111" stroke-width="1.8" stroke-linejoin="round"><path d="M10.3 2h3.4l.5 2.6 1.9.8 2.2-1.5 2.4 2.4-1.5 2.2.8 1.9 2.6.5v3.4l-2.6.5-.8 1.9 1.5 2.2-2.4 2.4-2.2-1.5-1.9.8-.5 2.6h-3.4l-.5-2.6-1.9-.8-2.2 1.5-2.4-2.4 1.5-2.2-.8-1.9L2 13.7v-3.4l2.6-.5.8-1.9-1.5-2.2 2.4-2.4 2.2 1.5 1.9-.8z"/><circle cx="12" cy="12" r="3.2" fill="#ffe600"/></svg>`;
+  document.body.appendChild(gear);
+
+  const panel = document.createElement('div');
+  panel.id = 'settings';
+  panel.innerHTML = `<div class="sp" role="dialog" aria-label="Chat Aquarium settings">
+    <div class="sp-head"><h2>Chat Aquarium — Settings</h2>
+      <p>Saved in this browser source and applied when you press <b>Save &amp; apply</b>. Heads up: this window shows on stream while it's open.</p></div>
+    <div class="sp-body"></div>
+    <div class="sp-foot">
+      <button class="btn" data-act="test">Add test fish</button>
+      <button class="btn" data-act="link">Copy setup link</button>
+      <button class="btn warn" data-act="defaults">Defaults</button>
+      <span class="sp-msg grow"></span>
+      <button class="btn" data-act="close">Cancel</button>
+      <button class="btn go" data-act="save">Save &amp; apply</button>
+      <input class="sp-link" readonly>
+    </div></div>`;
+  document.body.appendChild(panel);
+  const body = panel.querySelector('.sp-body'), msg = panel.querySelector('.sp-msg'), linkBox = panel.querySelector('.sp-link');
+  const inputs = {};
+
+  let sec = null;
+  for (const f of FIELDS) {
+    if (f.sec) {
+      sec = document.createElement('div'); sec.className = 'sp-sec';
+      const h = document.createElement('h3'); h.textContent = f.sec; sec.appendChild(h);
+      body.appendChild(sec); continue;
+    }
+    const wrapF = document.createElement('div'); wrapF.className = 'sp-f';
+    const id = 'sp-' + f.k;
+    const lab = document.createElement('label'); lab.htmlFor = id; lab.textContent = f.label;
+    let inp;
+    if (f.type === 'bool') {
+      const row = document.createElement('div'); row.className = 'sp-row';
+      const sw = document.createElement('span'); sw.className = 'sw';
+      inp = document.createElement('input'); inp.type = 'checkbox';
+      sw.append(inp, document.createElement('i'));
+      row.append(lab, sw); wrapF.appendChild(row);
+    } else if (f.type === 'select') {
+      inp = document.createElement('select');
+      for (const [v, t] of f.opts) { const o = document.createElement('option'); o.value = v; o.textContent = t; inp.appendChild(o); }
+      wrapF.append(lab, inp);
+    } else {
+      inp = document.createElement('input');
+      inp.type = f.type === 'num' ? 'number' : f.type;
+      if (f.type === 'num') { inp.min = f.min; inp.max = f.max; inp.step = f.step; }
+      if (f.ph) inp.placeholder = f.ph;
+      inp.spellcheck = false; inp.autocomplete = 'off';
+      wrapF.append(lab, inp);
+    }
+    inp.id = id;
+    if (f.help) { const sm = document.createElement('small'); sm.textContent = f.help; wrapF.appendChild(sm); }
+    if (f.k in fromURL) {
+      inp.disabled = true;
+      const sm = document.createElement('small'); sm.className = 'url';
+      sm.textContent = 'Set by the source URL, which overrides this.';
+      wrapF.appendChild(sm);
+    }
+    inputs[f.k] = inp;
+    sec.appendChild(wrapF);
+  }
+
+  const fill = (vals) => {
+    for (const [k, inp] of Object.entries(inputs)) {
+      const v = vals[k];
+      if (FIELD[k].type === 'bool') inp.checked = !!v; else inp.value = v;
+    }
+  };
+  const read = () => {
+    const out = {};
+    for (const [k, inp] of Object.entries(inputs)) out[k] = coerce(FIELD[k], FIELD[k].type === 'bool' ? inp.checked : inp.value);
+    return out;
+  };
+  const open = () => {
+    fill(SET);
+    msg.textContent = storageOK ? '' : 'This browser source can\'t save settings — use "Copy setup link" instead.';
+    linkBox.style.display = 'none';
+    panel.classList.add('open');
+  };
+  const close = () => panel.classList.remove('open');
+
+  gear.addEventListener('click', open);
+  panel.addEventListener('mousedown', e => { if (e.target === panel) close(); });
+  addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+
+  panel.querySelector('.sp-foot').addEventListener('click', e => {
+    const act = e.target.dataset && e.target.dataset.act;
+    if (!act) return;
+    if (act === 'close') close();
+    if (act === 'test') {
+      for (let i = 0; i < 6; i++) setTimeout(() => { const [n, c] = pick(DEMO); chatted(n, c, pick(DEMO_LINES)); }, i * 400);
+      close();
+    }
+    if (act === 'defaults') {
+      const d = {}; for (const f of Object.values(FIELD)) d[f.k] = f.def;
+      fill(d); msg.textContent = 'Defaults filled in — press Save & apply to keep them.';
+    }
+    if (act === 'link') {
+      const vals = read(), q = new URLSearchParams();
+      for (const f of Object.values(FIELD)) {
+        const v = vals[f.k];
+        if (v === f.def) continue;
+        q.set(f.k, f.type === 'bool' ? (v ? '1' : '0') : String(v));
+      }
+      const link = location.href.split(/[?#]/)[0] + (q.toString() ? '?' + q.toString() : '');
+      linkBox.value = link; linkBox.style.display = 'block'; linkBox.select();
+      const done = () => { msg.textContent = 'Setup link copied' + (vals.ytkey ? ' (it includes your YouTube API key — keep it private).' : '.'); };
+      try { navigator.clipboard.writeText(link).then(done, () => { document.execCommand('copy'); done(); }); }
+      catch (err) { try { document.execCommand('copy'); done(); } catch (e2) { msg.textContent = 'Copy the link from the box below.'; } }
+    }
+    if (act === 'save') {
+      try {
+        const vals = read();
+        // fields locked by the URL keep whatever was saved before (the URL value isn't a choice made here)
+        for (const k in fromURL) { if (k in saved) vals[k] = coerce(FIELD[k], saved[k]); else delete vals[k]; }
+        localStorage.setItem(STORE_KEY, JSON.stringify(vals));
+        msg.textContent = 'Saved! Reloading…';
+        setTimeout(() => location.reload(), 250);
+      } catch (err) {
+        msg.textContent = 'Couldn\'t save here — use "Copy setup link" and paste it as the source URL.';
+      }
+    }
+  });
+
+  // the buttons only appear while a mouse is over the overlay (i.e. in OBS's Interact window)
+  let mt;
+  addEventListener('mousemove', () => {
+    document.body.classList.add('mouse');
+    clearTimeout(mt); mt = setTimeout(() => document.body.classList.remove('mouse'), 3000);
+  });
+  document.addEventListener('mouseleave', () => document.body.classList.remove('mouse'));
+})();
+
+// ---------------- start ----------------
+layout();
+school = new THREE.Group(); scene.add(school);
+// bubbles and the rest fly in a flat plane on the sand's front edge, at whatever depth they came from
+const stage = model(0, 0, 0, scene);
+partMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial(), MAXP);
+for (let i = 0; i < MAXP; i++) partMesh.setColorAt(i, _c.set('#fff'));
+partMesh.count = 0; partMesh.frustumCulled = false; stage.inner.add(partMesh);
+buildDecor(); buildWater();
+lastT = performance.now() / 1000; raf = nextFrame(loop);
+let rt;
+addEventListener('resize', () => {
+  clearTimeout(rt);
+  rt = setTimeout(() => { layout(); buildDecor(); buildWater(); }, 250);
+});
+if (CFG.channel) connectTwitch(CFG.channel);
+if (CFG.kick) connectKick(CFG.kick);
+if (CFG.tiktok) connectBridge(CFG.tiktok, 'tiktok');
+if (CFG.youtube) {
+  if (/^wss?:\/\//i.test(CFG.youtube)) connectBridge(CFG.youtube, 'youtube');
+  else if (CFG.ytkey) connectYouTube(ytId(CFG.youtube), CFG.ytkey);
+  else console.warn('[aquarium] youtube= needs ytkey= (or a ws:// bridge URL)');
+}
+if (CFG.demo) setTimeout(runDemo, 800);
+if (!CFG.channel && !CFG.kick && !CFG.tiktok && !CFG.youtube && !CFG.demo)
+  toast('No chat connected yet: move the mouse over the overlay and click the gear, or add ?channel=yourchannel');
+</script>
+</body>
+</html>
