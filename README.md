@@ -26,7 +26,9 @@ In OBS: **Add → Browser**, URL `https://aquarium.ixitxachitl.com/?channel=your
 (e.g. 1920×1080). The background is transparent inside OBS.
 
 The tank takes the bottom 10% of the screen; **Tank height** (`height`) and **Tank width** (`width`, centred)
-change that. **Pixel size** (`pixel`) is 5 at 1080p unless you set it.
+change that. **Pixel size** (`pixel`) is 5 at 1080p unless you set it. **Detail** (`detail=2` or `3`) draws
+everything two or three times finer at the same size, with its edges rounded off the way the scale2x / scale3x
+pixel-art filters do it; the pixel size then rounds to a multiple of it (6 at 1080p).
 
 Right-click the source → **Interact** and move the mouse over it:
 

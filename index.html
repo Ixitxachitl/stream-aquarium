@@ -42,6 +42,8 @@
     height    how much of the screen the tank takes, % from the bottom (default 10)
     width     how wide the tank is, % of the screen, in the middle (default 100)
     pixel     screen pixels per art pixel (default 0 = about 1/216 of the source's height: 5 at 1080p)
+    detail    1 (default), 2 or 3: everything drawn that many times finer, the same size, with its edges
+              rounded off (scale2x / scale3x style); the pixel size rounds to a multiple of it
     water     0-90 how blue the water is (default 35; 0 = clear)
     volume    0-100 sound effects (default 30; 0 = silent)
     bg        testing: none = transparent in a normal browser too, or a color (default: dark outside OBS)
@@ -176,6 +178,8 @@ const FIELDS = [
   { k: 'height', label: 'Tank height (% of the screen)', type: 'num', def: 10, min: 5, max: 60, step: 1, help: 'How much of the bottom of the screen is water.' },
   { k: 'width', label: 'Tank width (% of the screen)', type: 'num', def: 100, min: 20, max: 100, step: 1, help: 'A narrower tank sits in the middle.' },
   { k: 'pixel', label: 'Pixel size', type: 'num', def: 0, min: 0, max: 16, step: 1, help: 'Screen pixels per art pixel: bigger is chunkier. 0 = automatic (5 at 1080p).' },
+  { k: 'detail', label: 'Detail', type: 'select', def: '1', opts: [['1', '1× — chunky pixels'], ['2', '2× — smoother, finer pixels'], ['3', '3× — smoothest']],
+    help: 'Draws everything 2 or 3 times finer at the same size, with rounded-off edges. Pixel size rounds to a multiple of it.' },
   { k: 'water', label: 'Water tint', type: 'num', def: 35, min: 0, max: 90, step: 5, help: '0 = clear water, higher = bluer.' },
   { k: 'volume', label: 'Sound effects volume', type: 'num', def: 30, min: 0, max: 100, step: 5, help: '0 = silent.' },
 ];
@@ -197,6 +201,7 @@ const CFG = {
   tiktok: SET.tiktok === '1' ? 'ws://localhost:21213/' : SET.tiktok,
   feed: SET.feed.toLowerCase().split(/\s+/)[0],
 };
+const DET = +CFG.detail;   // canvas pixels per art pixel, each way
 const SKIP = new Set(CFG.skip.toLowerCase().split(/[\s,]+/).map(s => s.replace(/^@/, '')).filter(Boolean));
 
 // Preview background outside OBS so you can actually see it in a browser
@@ -281,8 +286,40 @@ const colCache = new Map();
 const linear = css => { let c = colCache.get(css); if (!c) colCache.set(css, c = new THREE.Color(css)); return c; };
 // geometries made while this is set get put on it, so they can be thrown away together
 let geoSink = null;
+// Detail: each cube split DET × DET across (not in depth, which never shows), with the corners cut and the
+// diagonals smoothed the way the scale2x / scale3x pixel-art filters do it. Done twice: once on the outline
+// (filled or empty), which rounds the silhouette off, then on the colors inside, which rounds the markings.
+// g is the 3 × 3 around a cell, top row first; the result is its DET × DET sub-cells, top row first.
+function epx(g, eq) {
+  const [A, B, C, D, E, F, G, H, I] = g, ne = (u, v) => !eq(u, v);
+  const tl = eq(D, B) && ne(B, F) && ne(D, H), tr = eq(B, F) && ne(B, D) && ne(F, H);
+  const bl = eq(D, H) && ne(D, B) && ne(H, F), br = eq(H, F) && ne(D, H) && ne(B, F);
+  if (DET === 2) return [tl ? D : E, tr ? F : E, bl ? D : E, br ? F : E];
+  return [tl ? D : E, (tl && ne(E, C)) || (tr && ne(E, A)) ? B : E, tr ? F : E,
+    (tl && ne(E, G)) || (bl && ne(E, A)) ? D : E, E, (tr && ne(E, I)) || (br && ne(E, C)) ? F : E,
+    bl ? D : E, (bl && ne(E, I)) || (br && ne(E, G)) ? H : E, br ? F : E];
+}
+const sameFill = (u, v) => !u === !v, sameCol = (u, v) => u === v;
+function finer(vox) {
+  const at = new Map(), seen = new Set(), out = [];
+  for (const v of vox) at.set(vkey(v[0], v[1], v[2]), v[3]);
+  for (const [x, y, z] of vox) for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+    // every cube and the empty cells round it (an empty one can get filled in, at an inside corner)
+    const cx = x + dx, cy = y + dy, k = vkey(cx, cy, z);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const g = [], E = at.get(k);
+    for (const j of [1, 0, -1]) for (const i of [-1, 0, 1]) g.push(at.get(vkey(cx + i, cy + j, z)));
+    const shape = epx(g, sameFill), paint = E && epx(g, sameCol);
+    shape.forEach((c, n) => {
+      if (c) out.push([cx * DET + n % DET, cy * DET + DET - 1 - Math.floor(n / DET), z, E ? paint[n] || E : c]);
+    });
+  }
+  return out;
+}
 // vox: [x, y, z, color] unit cubes; only the faces that aren't against another cube are kept
 function voxGeo(vox) {
+  if (DET > 1) vox = finer(vox);
   const occ = new Set();
   for (const v of vox) occ.add(vkey(v[0], v[1], v[2]));
   const pos = [], col = [];
@@ -296,7 +333,7 @@ function voxGeo(vox) {
         return AO[s1 && s2 ? 3 : s1 + s2 + occ.has(vkey(nx + d[0], ny + d[1], nz + d[2]))];
       });
       for (const i of [0, 1, 2, 0, 2, 3]) {
-        pos.push(x + q[i][0], y + q[i][1], z + q[i][2]);
+        pos.push((x + q[i][0]) / DET, (y + q[i][1]) / DET, z + q[i][2]);
         col.push(Math.min(1, c.r * t[0] * ao[i]), Math.min(1, c.g * t[1] * ao[i]), Math.min(1, c.b * t[2] * ao[i]));
       }
     }
@@ -357,14 +394,15 @@ const DEPTH = 8;         // how far back the sand goes
 const AIR = 12;          // rows of air over the water
 let PX = 5, W = 2, H = 2, HW = 2, SURF = 2, cssLeft = 0, cssTop = 0;
 const BASE = 3;          // the sand's front edge, in rows up from the bottom of the canvas
-// The canvas is drawn at one pixel per art pixel and blown up, so it stays crisp. One world unit = one pixel across.
+// The canvas is drawn at one pixel per art pixel (DET × DET with more detail) and blown up, so it stays crisp.
+// One world unit = one art pixel across.
 function layout() {
-  PX = CFG.pixel || Math.max(2, Math.round(innerHeight / 216));
+  PX = Math.max(1, Math.round((CFG.pixel || Math.max(2, innerHeight / 216)) / DET)) * DET;
   W = Math.max(60, Math.ceil(innerWidth * CFG.width / 100 / PX / 2) * 2);
   HW = Math.max(16, Math.round(innerHeight * CFG.height / 100 / PX));
   H = Math.ceil((HW + AIR) / 2) * 2;
   SURF = HW - BASE;      // the first row above the water
-  renderer.setSize(W, H, false);
+  renderer.setSize(W * DET, H * DET, false);
   cssLeft = Math.floor((innerWidth - W * PX) / 2); cssTop = innerHeight - H * PX;
   Object.assign(canvas.style, { width: W * PX + 'px', height: H * PX + 'px', left: cssLeft + 'px', top: cssTop + 'px' });
   camera.left = -W / 2; camera.right = W / 2; camera.top = H / 2; camera.bottom = -H / 2;
@@ -376,6 +414,7 @@ function layout() {
   r.setProperty('--p', PX + 'px');
   r.setProperty('--ol', [[o, 0], [-o, 0], [0, o], [0, -o], [o, o], [-o, o], [o, -o], [-o, -o]].map(([x, y]) => `${x}px ${y}px 0 #121026`).join(','));
 }
+const snap = v => Math.round(v * DET) / DET;      // to the nearest canvas pixel
 const worldY = (sy, z) => (sy + z * SIN) / COS;   // the height that puts something at depth z on screen row sy
 const sandAt = z => Math.ceil(-z * SIN);           // the screen row the sand comes up to, at depth z
 const cssX = x => cssLeft + (W / 2 + x) * PX;
@@ -411,8 +450,8 @@ const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
 let water = null;
 function buildWater() {
   if (water) { camera.remove(water.mesh); water.tex.dispose(); water.mesh.geometry.dispose(); water.mesh.material.dispose(); }
-  const cv = document.createElement('canvas'); cv.width = W; cv.height = HW;
-  const ctx = cv.getContext('2d'), img = ctx.createImageData(W, HW);
+  const cv = document.createElement('canvas'); cv.width = W * DET; cv.height = HW * DET;
+  const ctx = cv.getContext('2d'), img = ctx.createImageData(W * DET, HW * DET);
   const tex = new THREE.CanvasTexture(cv);
   tex.magFilter = tex.minFilter = THREE.NearestFilter; tex.generateMipmaps = false; tex.colorSpace = THREE.SRGBColorSpace;
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(W, HW), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false }));
@@ -425,14 +464,15 @@ function drawWater() {
   const { img, ctx, tex, rays } = water, d = img.data, A = CFG.water / 100;
   const top = [90, 200, 235], bot = [26, 82, 160], ray = [215, 248, 255];
   const rx = rays.map(r => r.x + Math.sin(clock * r.sp + r.ph) * 16);
-  for (let y = 0; y < HW; y++) {
-    const t = y / (HW - 1);
-    for (let x = 0; x < W; x++) {
-      const i = (y * W + x) * 4, th = (BAYER[(y & 3) * 4 + (x & 3)] + .5) / 16;
+  // (px, py: canvas pixels; x, y: art pixels, for the shapes, so the detail setting only makes them finer)
+  for (let py = 0; py < HW * DET; py++) {
+    const y = py / DET, t = y / (HW - 1);
+    for (let px = 0; px < W * DET; px++) {
+      const x = px / DET, i = (py * W * DET + px) * 4, th = (BAYER[(py & 3) * 4 + (px & 3)] + .5) / 16;
       let c, a;
       if (y < 2) {
         // the surface: a bright line that ripples, with darker gaps sliding along it
-        const wv = Math.sin(x * .29 + clock * 2.2) + Math.sin(x * .11 - clock * 1.5) * .8 + (y ? -.8 : 0);
+        const wv = Math.sin(x * .29 + clock * 2.2) + Math.sin(x * .11 - clock * 1.5) * .8 + (y >= 1 ? -.8 : 0);
         c = wv > -.2 ? [230, 252, 255] : [130, 215, 242];
         a = wv > -.2 ? .85 : .5 + A * .4;
       } else {
@@ -602,7 +642,7 @@ function updateParts(dt) {
   }
   partMesh.count = parts.length;
   parts.forEach((p, i) => {
-    _m.position.set(Math.round(p.x) + .5, Math.round(p.y) + .5, (p.y * SIN + p.wz) / COS + 1.5);
+    _m.position.set(snap(p.x) + .5, snap(p.y) + .5, (p.y * SIN + p.wz) / COS + 1.5);
     _m.scale.setScalar(p.s); _m.updateMatrix();
     partMesh.setMatrixAt(i, _m.matrix); partMesh.setColorAt(i, _c.set(p.col));
   });
@@ -813,13 +853,13 @@ function updateFish(f, dt) {
   f.wag += dt * (5 + v * .45);
   f.tailG.rotation.y = Math.sin(f.wag) * (.3 + Math.min(.5, v / 40));
   f.inner.rotation.z = f.pitch;
-  f.inner.position.y = f.mode === 'swim' && v < 4 ? Math.round(Math.sin(clock * 1.6 + f.ph) * .6) : 0;
+  f.inner.position.y = f.mode === 'swim' && v < 4 ? snap(Math.sin(clock * 1.6 + f.ph) * .6) : 0;
   f.pivot.rotation.y = f.yaw;
   // whole pixels only, so the art never smears
-  const x = Math.round(f.x), y = Math.round(f.y), z = Math.round(f.z);
+  const x = snap(f.x), y = snap(f.y), z = Math.round(f.z);
   f.root.position.set(x, worldY(y, z), z);
   f.shadow.visible = f.y < SURF;
-  f.shadow.position.set(Math.round(x + f.cx * f.facing), .06, z);
+  f.shadow.position.set(snap(x + f.cx * f.facing), .06, z);
   f.shadow.scale.x = f.shadow.scale.z = f.pivot.scale.x * clamp(1 - (y - lo) / 30, .45, 1);
   return true;
 }
@@ -842,7 +882,7 @@ function placeTag(f) {
   if (show !== f.nameOn) { f.nameOn = show; f.nameEl.classList.toggle('off', !show); }
   if (f.sayUntil && clock > f.sayUntil) unsay(f);
   // kept inside the tank, so a fish by the edge doesn't push its speech bubble off the screen
-  const m = f.leaving ? -1e4 : f.tagW / 2 + 4, x = clamp(cssX(Math.round(f.x) + .5), Math.min(cssLeft + m, cssX(0)), Math.max(cssLeft + W * PX - m, cssX(0))), y = cssY(Math.round(f.y) + f.top + 2 + f.inner.position.y);
+  const m = f.leaving ? -1e4 : f.tagW / 2 + 4, x = clamp(cssX(snap(f.x) + .5), Math.min(cssLeft + m, cssX(0)), Math.max(cssLeft + W * PX - m, cssX(0))), y = cssY(snap(f.y) + f.top + 2 + f.inner.position.y);
   f.tag.style.transform = `translate(${x.toFixed(1)}px,${y.toFixed(1)}px) translate(-50%,-100%)`;
 }
 
